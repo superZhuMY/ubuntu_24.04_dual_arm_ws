@@ -1,0 +1,68 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="double_arm_robot">
+    <xacro:arg name="initial_positions_file" default="initial_positions.yaml" />
+    <xacro:arg name="hardware_mode" default="dry_run" />
+    <xacro:arg name="transport_type" default="direct_motor" />
+    <xacro:arg name="test_arm" default="none" />
+    <xacro:arg name="e3_safe_hold" default="false" />
+    <xacro:arg name="e3_preview_only" default="false" />
+    <xacro:arg name="e4_home" default="false" />
+    <xacro:arg name="e4_left_joints" default="" />
+    <xacro:arg name="e4_right_joints" default="" />
+    <xacro:arg name="e4_left_order" default="1" />
+    <xacro:arg name="e4_right_order" default="1" />
+    <xacro:arg name="e4_step_rad" default="0.01" />
+    <xacro:arg name="e4_tol_rad" default="0.005" />
+    <xacro:arg name="e4_timeout_ms" default="60000" />
+    <xacro:arg name="e4_hold_cycles" default="20" />
+    <xacro:arg name="e4_static_hold_cycles" default="50" />
+    <xacro:arg name="e4_max_error_rad" default="0.05" />
+    <xacro:arg name="stm32_device" default="/dev/serial/by-id/usb-AIMotor_F407" />
+    <xacro:arg name="stm32_baud_rate" default="115200" />
+    <xacro:arg name="stm32_target_ack_timeout_ms" default="200" />
+    <xacro:arg name="stm32_state_timeout_ms" default="200" />
+    <xacro:arg name="stm32_control_ack_timeout_ms" default="10000" />
+    <xacro:arg name="stm32_state_poll_hz" default="20.0" />
+    <xacro:arg name="stm32_state_stale_ms" default="1000" />
+    <xacro:arg name="stm32_activate_timeout_ms" default="10000" />
+    <xacro:arg name="stm32_zero_offsets" default="0,0,0,0,0,0,0,0,0,0,0,0" />
+    <xacro:arg name="stm32_read_only" default="true" />
+    <xacro:arg name="allow_motor_enable" default="false" />
+
+    <!-- Import double_arm_robot urdf file -->
+    <xacro:include filename="$(find double_arm_robot)/urdf/Double_arm_robot.urdf" />
+
+    <!-- Import control_xacro -->
+    <xacro:include filename="double_arm_robot.ros2_control.xacro" />
+
+    <xacro:double_arm_robot_ros2_control
+      initial_positions_file="$(arg initial_positions_file)"
+      hardware_mode="$(arg hardware_mode)"
+      transport_type="$(arg transport_type)"
+      test_arm="$(arg test_arm)"
+      e3_safe_hold="$(arg e3_safe_hold)"
+      e3_preview_only="$(arg e3_preview_only)"
+      e4_home="$(arg e4_home)"
+      e4_left_joints="$(arg e4_left_joints)"
+      e4_right_joints="$(arg e4_right_joints)"
+      e4_left_order="$(arg e4_left_order)"
+      e4_right_order="$(arg e4_right_order)"
+      e4_step_rad="$(arg e4_step_rad)"
+      e4_tol_rad="$(arg e4_tol_rad)"
+      e4_timeout_ms="$(arg e4_timeout_ms)"
+      e4_hold_cycles="$(arg e4_hold_cycles)"
+      e4_static_hold_cycles="$(arg e4_static_hold_cycles)"
+      e4_max_error_rad="$(arg e4_max_error_rad)"
+      stm32_device="$(arg stm32_device)"
+      stm32_baud_rate="$(arg stm32_baud_rate)"
+      stm32_target_ack_timeout_ms="$(arg stm32_target_ack_timeout_ms)"
+      stm32_state_timeout_ms="$(arg stm32_state_timeout_ms)"
+      stm32_control_ack_timeout_ms="$(arg stm32_control_ack_timeout_ms)"
+      stm32_state_poll_hz="$(arg stm32_state_poll_hz)"
+      stm32_state_stale_ms="$(arg stm32_state_stale_ms)"
+      stm32_activate_timeout_ms="$(arg stm32_activate_timeout_ms)"
+      stm32_zero_offsets="$(arg stm32_zero_offsets)"
+      stm32_read_only="$(arg stm32_read_only)"
+      allow_motor_enable="$(arg allow_motor_enable)"/>
+
+</robot>

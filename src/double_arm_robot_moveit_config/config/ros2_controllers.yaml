@@ -1,0 +1,53 @@
+# Ros2_control configuration for the dual-arm robot.
+# All nodes run in the /double_arm_robot namespace — use FQN keys.
+#
+# Action URIs:
+#   /double_arm_robot/l_arm/follow_joint_trajectory
+#   /double_arm_robot/r_arm/follow_joint_trajectory
+
+# controller_manager update_rate = 20 Hz matches the original ROS1
+# firmware control cycle (ros::Rate(20) in ReadThread + write_joint_data).
+# All hardware communication is synchronous at this rate.
+# A higher rate would increase serial/Modbus bus load without benefit.
+/double_arm_robot/controller_manager:
+  ros__parameters:
+    update_rate: 20  # Hz (original ROS1 control cycle)
+
+    l_arm:
+      type: joint_trajectory_controller/JointTrajectoryController
+
+    r_arm:
+      type: joint_trajectory_controller/JointTrajectoryController
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+/double_arm_robot/l_arm:
+  ros__parameters:
+    joints:
+      - L_Joint_1
+      - L_Joint_2
+      - L_Joint_3
+      - L_Joint_4
+      - L_Joint_5
+      - L_Joint_6
+    command_interfaces:
+      - position
+    state_interfaces:
+      - position
+    allow_nonzero_velocity_at_trajectory_end: true
+
+/double_arm_robot/r_arm:
+  ros__parameters:
+    joints:
+      - R_Joint_1
+      - R_Joint_2
+      - R_Joint_3
+      - R_Joint_4
+      - R_Joint_5
+      - R_Joint_6
+    command_interfaces:
+      - position
+    state_interfaces:
+      - position
+    allow_nonzero_velocity_at_trajectory_end: true

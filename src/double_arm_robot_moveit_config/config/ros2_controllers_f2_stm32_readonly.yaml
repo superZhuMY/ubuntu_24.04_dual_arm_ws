@@ -1,0 +1,9 @@
+# F.2 read-only STM32 configuration: joint_state_broadcaster only.
+# No trajectory controllers and no MoveIt — the robot must not move in F.2
+# (read-only safety gate).
+/double_arm_robot/controller_manager:
+  ros__parameters:
+    update_rate: 20  # Hz (matches the firmware control cycle)
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster

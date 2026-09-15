@@ -1,0 +1,254 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <!-- ==============================================================
+    double_arm_robot_ros2_control
+
+    hardware_mode := fake | dry_run | real   (default: dry_run)
+    transport_type:= direct_motor | stm32   (default: direct_motor)
+    test_arm      := left | right | none     (E.3: only this arm opens devices)
+    e3_safe_hold  := true|false              (E.3: read→sync→enable order)
+    e3_preview_only := true|false            (E.3: read+sync+print, no enable)
+    e4_home       := true|false              (E.4: step-wise homing to 0 rad)
+    e4_left_joints / e4_right_joints         (E.4: per-arm joint sequence 1..6)
+    e4_left_order / e4_right_order            (E.4: 1=home first, 2=wait)
+    e4_step_rad / e4_tol_rad / e4_timeout_ms / e4_hold_cycles
+    e4_static_hold_cycles / e4_max_error_rad
+
+    STM32 branch (transport_type=stm32, single 12-axis instance):
+    stm32_device / stm32_baud_rate / stm32_target_ack_timeout_ms
+    stm32_state_timeout_ms / stm32_control_ack_timeout_ms
+    stm32_state_poll_hz / stm32_state_stale_ms / stm32_activate_timeout_ms
+    stm32_zero_offsets / stm32_read_only / allow_motor_enable
+
+    fake:     mock_components/GenericSystem, 12 joints, velocity ifaces
+    dry_run/real + direct_motor: ArmSystemHardware × 2 (unchanged)
+    dry_run/real + stm32:        Stm32SystemHardware × 1, 12 joints
+    ============================================================== -->
+  <xacro:macro name="double_arm_robot_ros2_control"
+               params="initial_positions_file
+                       hardware_mode:=dry_run
+                       transport_type:=direct_motor
+                       test_arm:=none
+                       e3_safe_hold:=false
+                       e3_preview_only:=false
+                       e4_home:=false
+                       e4_left_joints:=''
+                       e4_right_joints:=''
+                       e4_left_order:=1
+                       e4_right_order:=1
+                       e4_step_rad:=0.01
+                       e4_tol_rad:=0.005
+                       e4_timeout_ms:=60000
+                       e4_hold_cycles:=20
+                       e4_static_hold_cycles:=50
+                       e4_max_error_rad:=0.05
+                       stm32_device:='/dev/serial/by-id/usb-AIMotor_F407'
+                       stm32_baud_rate:=115200
+                       stm32_target_ack_timeout_ms:=200
+                       stm32_state_timeout_ms:=200
+                       stm32_control_ack_timeout_ms:=10000
+                       stm32_state_poll_hz:=20.0
+                       stm32_state_stale_ms:=1000
+                       stm32_activate_timeout_ms:=10000
+                       stm32_zero_offsets:='0,0,0,0,0,0,0,0,0,0,0,0'
+                       stm32_read_only:=true
+                       allow_motor_enable:=false">
+
+    <xacro:property name="init_pos"
+      value="${xacro.load_yaml(initial_positions_file)['initial_positions']}"/>
+
+    <!-- ── FAKE mode ──────────────────────────────────────────── -->
+    <xacro:if value="${hardware_mode == 'fake'}">
+      <ros2_control name="FakeSystem" type="system">
+        <hardware>
+          <plugin>mock_components/GenericSystem</plugin>
+        </hardware>
+        <xacro:macro name="fake_j" params="j init_v">
+          <joint name="${j}">
+            <command_interface name="position"/>
+            <state_interface name="position">
+              <param name="initial_value">${init_v}</param>
+            </state_interface>
+            <state_interface name="velocity"/>
+          </joint>
+        </xacro:macro>
+        <xacro:fake_j j="L_Joint_1" init_v="${init_pos['L_Joint_1']}"/>
+        <xacro:fake_j j="L_Joint_2" init_v="${init_pos['L_Joint_2']}"/>
+        <xacro:fake_j j="L_Joint_3" init_v="${init_pos['L_Joint_3']}"/>
+        <xacro:fake_j j="L_Joint_4" init_v="${init_pos['L_Joint_4']}"/>
+        <xacro:fake_j j="L_Joint_5" init_v="${init_pos['L_Joint_5']}"/>
+        <xacro:fake_j j="L_Joint_6" init_v="${init_pos['L_Joint_6']}"/>
+        <xacro:fake_j j="R_Joint_1" init_v="${init_pos['R_Joint_1']}"/>
+        <xacro:fake_j j="R_Joint_2" init_v="${init_pos['R_Joint_2']}"/>
+        <xacro:fake_j j="R_Joint_3" init_v="${init_pos['R_Joint_3']}"/>
+        <xacro:fake_j j="R_Joint_4" init_v="${init_pos['R_Joint_4']}"/>
+        <xacro:fake_j j="R_Joint_5" init_v="${init_pos['R_Joint_5']}"/>
+        <xacro:fake_j j="R_Joint_6" init_v="${init_pos['R_Joint_6']}"/>
+      </ros2_control>
+    </xacro:if>
+
+    <!-- ── DRY_RUN / REAL modes ───────────────────────────────── -->
+    <xacro:if value="${hardware_mode != 'fake'}">
+
+      <!-- ── Direct-motor backend: ArmSystemHardware × 2 ──────── -->
+      <xacro:if value="${transport_type == 'direct_motor'}">
+      <xacro:macro name="arm_hw"
+                   params="name side modbus_dev serial_dev slaves motors
+                           j1 j2 j3 j4 j5 j6
+                           iv1 iv2 iv3 iv4 iv5 iv6
+                           test_arm e3_safe_hold e3_preview_only
+                           e4_home e4_home_joints
+                           e4_arm_order
+                           e4_step_rad e4_tol_rad e4_timeout_ms
+                           e4_hold_cycles e4_static_hold_cycles
+                           e4_max_error_rad">
+        <ros2_control name="${name}" type="system">
+          <hardware>
+            <plugin>double_arm_hardware/ArmSystemHardware</plugin>
+            <param name="hardware_mode">${hardware_mode}</param>
+            <param name="arm_side">${side}</param>
+            <param name="test_arm">${test_arm}</param>
+            <param name="e3_safe_hold">${'true' if e3_safe_hold else 'false'}</param>
+            <param name="e3_preview_only">${'true' if e3_preview_only else 'false'}</param>
+            <param name="e4_home">${'true' if e4_home else 'false'}</param>
+            <param name="e4_home_joints">${e4_home_joints}</param>
+            <param name="e4_arm_order">${e4_arm_order}</param>
+            <param name="e4_step_rad">${e4_step_rad}</param>
+            <param name="e4_tol_rad">${e4_tol_rad}</param>
+            <param name="e4_timeout_ms">${e4_timeout_ms}</param>
+            <param name="e4_hold_cycles">${e4_hold_cycles}</param>
+            <param name="e4_static_hold_cycles">${e4_static_hold_cycles}</param>
+            <param name="e4_max_error_rad">${e4_max_error_rad}</param>
+            <param name="modbus_device">${modbus_dev}</param>
+            <param name="serial_device">${serial_dev}</param>
+            <param name="modbus_slaves">${slaves}</param>
+            <param name="serial_motor_ids">${motors}</param>
+            <param name="comm_cycle_ms">50</param>
+            <param name="timeout_ms">20</param>
+            <param name="error_threshold">5</param>
+            <param name="enable_hardware">${'true' if hardware_mode == 'real' else 'false'}</param>
+            <param name="allow_hardware_io">${'true' if hardware_mode == 'real' else 'false'}</param>
+          </hardware>
+          <joint name="${j1}">
+            <command_interface name="position"/>
+            <state_interface name="position">
+              <param name="initial_value">${iv1}</param>
+            </state_interface>
+          </joint>
+          <joint name="${j2}">
+            <command_interface name="position"/>
+            <state_interface name="position">
+              <param name="initial_value">${iv2}</param>
+            </state_interface>
+          </joint>
+          <joint name="${j3}">
+            <command_interface name="position"/>
+            <state_interface name="position">
+              <param name="initial_value">${iv3}</param>
+            </state_interface>
+          </joint>
+          <joint name="${j4}">
+            <command_interface name="position"/>
+            <state_interface name="position">
+              <param name="initial_value">${iv4}</param>
+            </state_interface>
+          </joint>
+          <joint name="${j5}">
+            <command_interface name="position"/>
+            <state_interface name="position">
+              <param name="initial_value">${iv5}</param>
+            </state_interface>
+          </joint>
+          <joint name="${j6}">
+            <command_interface name="position"/>
+            <state_interface name="position">
+              <param name="initial_value">${iv6}</param>
+            </state_interface>
+          </joint>
+        </ros2_control>
+      </xacro:macro>
+
+      <xacro:arm_hw name="LeftArm"  side="left"
+        modbus_dev="/dev/tcp_l_modbus" serial_dev="/dev/tcp_l_serial"
+        slaves="1,2,3" motors="4,5,6"
+        j1="L_Joint_1" j2="L_Joint_2" j3="L_Joint_3"
+        j4="L_Joint_4" j5="L_Joint_5" j6="L_Joint_6"
+        iv1="${init_pos['L_Joint_1']}" iv2="${init_pos['L_Joint_2']}"
+        iv3="${init_pos['L_Joint_3']}" iv4="${init_pos['L_Joint_4']}"
+        iv5="${init_pos['L_Joint_5']}" iv6="${init_pos['L_Joint_6']}"
+        test_arm="${test_arm}" e3_safe_hold="${e3_safe_hold}"
+        e3_preview_only="${e3_preview_only}"
+        e4_home="${e4_home}" e4_home_joints="${e4_left_joints}"
+        e4_arm_order="${e4_left_order}"
+        e4_step_rad="${e4_step_rad}" e4_tol_rad="${e4_tol_rad}"
+        e4_timeout_ms="${e4_timeout_ms}" e4_hold_cycles="${e4_hold_cycles}"
+        e4_static_hold_cycles="${e4_static_hold_cycles}"
+        e4_max_error_rad="${e4_max_error_rad}"/>
+
+      <xacro:arm_hw name="RightArm" side="right"
+        modbus_dev="/dev/tcp_r_modbus" serial_dev="/dev/tcp_r_serial"
+        slaves="1,2,3" motors="4,5,6"
+        j1="R_Joint_1" j2="R_Joint_2" j3="R_Joint_3"
+        j4="R_Joint_4" j5="R_Joint_5" j6="R_Joint_6"
+        iv1="${init_pos['R_Joint_1']}" iv2="${init_pos['R_Joint_2']}"
+        iv3="${init_pos['R_Joint_3']}" iv4="${init_pos['R_Joint_4']}"
+        iv5="${init_pos['R_Joint_5']}" iv6="${init_pos['R_Joint_6']}"
+        test_arm="${test_arm}" e3_safe_hold="${e3_safe_hold}"
+        e3_preview_only="${e3_preview_only}"
+        e4_home="${e4_home}" e4_home_joints="${e4_right_joints}"
+        e4_arm_order="${e4_right_order}"
+        e4_step_rad="${e4_step_rad}" e4_tol_rad="${e4_tol_rad}"
+        e4_timeout_ms="${e4_timeout_ms}" e4_hold_cycles="${e4_hold_cycles}"
+        e4_static_hold_cycles="${e4_static_hold_cycles}"
+        e4_max_error_rad="${e4_max_error_rad}"/>
+      </xacro:if>
+
+      <!-- ── STM32 backend: single 12-axis instance ───────────── -->
+      <xacro:if value="${transport_type == 'stm32'}">
+        <ros2_control name="Stm32System" type="system">
+          <hardware>
+            <plugin>double_arm_hardware/Stm32SystemHardware</plugin>
+            <param name="transport_type">stm32</param>
+            <param name="stm32_device">${stm32_device}</param>
+            <param name="stm32_baud_rate">${stm32_baud_rate}</param>
+            <param name="stm32_target_ack_timeout_ms">${stm32_target_ack_timeout_ms}</param>
+            <param name="stm32_state_timeout_ms">${stm32_state_timeout_ms}</param>
+            <param name="stm32_control_ack_timeout_ms">${stm32_control_ack_timeout_ms}</param>
+            <param name="stm32_state_poll_hz">${stm32_state_poll_hz}</param>
+            <param name="stm32_state_stale_ms">${stm32_state_stale_ms}</param>
+            <param name="stm32_activate_timeout_ms">${stm32_activate_timeout_ms}</param>
+            <param name="stm32_zero_offsets">${stm32_zero_offsets}</param>
+            <param name="stm32_read_only">${'true' if stm32_read_only else 'false'}</param>
+            <param name="allow_motor_enable">${'true' if allow_motor_enable else 'false'}</param>
+            <param name="enable_hardware">${'true' if hardware_mode == 'real' else 'false'}</param>
+            <param name="allow_hardware_io">${'true' if hardware_mode == 'real' else 'false'}</param>
+            <param name="error_threshold">5</param>
+          </hardware>
+          <xacro:macro name="stm32_j" params="j init_v">
+            <joint name="${j}">
+              <command_interface name="position"/>
+              <state_interface name="position">
+                <param name="initial_value">${init_v}</param>
+              </state_interface>
+            </joint>
+          </xacro:macro>
+          <xacro:stm32_j j="L_Joint_1" init_v="${init_pos['L_Joint_1']}"/>
+          <xacro:stm32_j j="L_Joint_2" init_v="${init_pos['L_Joint_2']}"/>
+          <xacro:stm32_j j="L_Joint_3" init_v="${init_pos['L_Joint_3']}"/>
+          <xacro:stm32_j j="L_Joint_4" init_v="${init_pos['L_Joint_4']}"/>
+          <xacro:stm32_j j="L_Joint_5" init_v="${init_pos['L_Joint_5']}"/>
+          <xacro:stm32_j j="L_Joint_6" init_v="${init_pos['L_Joint_6']}"/>
+          <xacro:stm32_j j="R_Joint_1" init_v="${init_pos['R_Joint_1']}"/>
+          <xacro:stm32_j j="R_Joint_2" init_v="${init_pos['R_Joint_2']}"/>
+          <xacro:stm32_j j="R_Joint_3" init_v="${init_pos['R_Joint_3']}"/>
+          <xacro:stm32_j j="R_Joint_4" init_v="${init_pos['R_Joint_4']}"/>
+          <xacro:stm32_j j="R_Joint_5" init_v="${init_pos['R_Joint_5']}"/>
+          <xacro:stm32_j j="R_Joint_6" init_v="${init_pos['R_Joint_6']}"/>
+        </ros2_control>
+      </xacro:if>
+
+    </xacro:if>
+
+  </xacro:macro>
+</robot>

@@ -1,0 +1,19 @@
+# ROS 2 / colcon 构建产物
+build/
+install/
+log/
+
+# 独立的 STM32 固件仓库（clone，不属于本工作区）
+# 见 https://github.com/superZhuMY/AIMotor_F407_Demo_v2
+AIMotor_F407_Demo_v2/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+*.swp
+.DS_Store

@@ -1,0 +1,28 @@
+<library path="double_arm_hardware">
+  <class
+    name="double_arm_hardware/ArmSystemHardware"
+    type="double_arm_hardware::ArmSystemHardware"
+    base_class_type="hardware_interface::SystemInterface"
+  >
+    <description>
+      JAKA dual-arm SystemInterface plugin.
+      Supports dry-run (no hardware) and real Modbus+serial modes.
+      Each URDF ros2_control instance configures one arm (left or right).
+    </description>
+  </class>
+
+  <class
+    name="double_arm_hardware/Stm32SystemHardware"
+    type="double_arm_hardware::Stm32SystemHardware"
+    base_class_type="hardware_interface::SystemInterface"
+  >
+    <description>
+      Whole-robot SystemInterface for the AIMotor_F407 STM32 (V1.3.1).
+      One instance exports all 12 joints (L_J1..L_J6, R_J1..R_J6) and talks
+      to one serial device with the binary whole-robot protocol.
+      on_configure is READ-ONLY (open + HELLO + GET_STATE, no enable);
+      on_activate waits for valid_bitmap == 0x0FFF, syncs command to feedback,
+      runs ENABLE, verifies enabled == 0x0FFF, then opens the target gate.
+    </description>
+  </class>
+</library>

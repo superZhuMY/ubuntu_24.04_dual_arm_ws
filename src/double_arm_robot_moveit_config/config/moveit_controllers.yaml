@@ -1,0 +1,35 @@
+# MoveIt uses this configuration for controller management
+# Controller names match those in ros2_controllers.yaml.
+# With controller_manager in /double_arm_robot namespace,
+# MoveIt connects to:
+#   /double_arm_robot/l_arm/follow_joint_trajectory
+#   /double_arm_robot/r_arm/follow_joint_trajectory
+
+moveit_controller_manager: moveit_simple_controller_manager/MoveItSimpleControllerManager
+
+moveit_simple_controller_manager:
+  controller_names:
+    - l_arm
+    - r_arm
+
+  l_arm:
+    type: FollowJointTrajectory
+    action_ns: follow_joint_trajectory
+    joints:
+      - L_Joint_1
+      - L_Joint_2
+      - L_Joint_3
+      - L_Joint_4
+      - L_Joint_5
+      - L_Joint_6
+
+  r_arm:
+    type: FollowJointTrajectory
+    action_ns: follow_joint_trajectory
+    joints:
+      - R_Joint_1
+      - R_Joint_2
+      - R_Joint_3
+      - R_Joint_4
+      - R_Joint_5
+      - R_Joint_6

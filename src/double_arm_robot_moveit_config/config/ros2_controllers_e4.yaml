@@ -1,0 +1,49 @@
+# E.4 controller configuration.
+#
+# update_rate = 5 Hz: the real full communication cycle was measured at
+# ~170 ms (read ~30 ms + write ~141 ms), so the 20 Hz configuration
+# continuously overruns.  5 Hz (200 ms budget) is the conservative stable
+# rate used for the first E.4 active-motion round (per E.4 prompt §六).
+
+/double_arm_robot/controller_manager:
+  ros__parameters:
+    update_rate: 5  # Hz — conservative stable rate for E.4 stepwise homing
+
+    l_arm:
+      type: joint_trajectory_controller/JointTrajectoryController
+
+    r_arm:
+      type: joint_trajectory_controller/JointTrajectoryController
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+/double_arm_robot/l_arm:
+  ros__parameters:
+    joints:
+      - L_Joint_1
+      - L_Joint_2
+      - L_Joint_3
+      - L_Joint_4
+      - L_Joint_5
+      - L_Joint_6
+    command_interfaces:
+      - position
+    state_interfaces:
+      - position
+    allow_nonzero_velocity_at_trajectory_end: true
+
+/double_arm_robot/r_arm:
+  ros__parameters:
+    joints:
+      - R_Joint_1
+      - R_Joint_2
+      - R_Joint_3
+      - R_Joint_4
+      - R_Joint_5
+      - R_Joint_6
+    command_interfaces:
+      - position
+    state_interfaces:
+      - position
+    allow_nonzero_velocity_at_trajectory_end: true
