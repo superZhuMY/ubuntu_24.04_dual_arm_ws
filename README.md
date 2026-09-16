@@ -79,8 +79,38 @@ ros2 launch double_arm_robot_moveit_config e5_moveit.launch.py \
   e4_home:=false start_rviz:=true
 
 # F.2 STM32 只读（固定 real+stm32+read_only，仅状态链路）—— 尚未真机启动过
-ros2 launch double_arm_robot_moveit_config f2_stm32_readonly.launch.py
+ros2 launch double_arm_robot_moveit_config f2_stm32_readonly.launch.py \
+  stm32_device:=/dev/ttyUSB0
+
+# STM32 + MoveIt（首次先用下面的逐轴工具确认方向；尚未完成真机验证）
+ros2 launch double_arm_robot_moveit_config stm32_moveit.launch.py \
+  stm32_device:=/dev/ttyUSB0 \
+  stm32_joint_directions:=1,1,1,1,1,1,1,1,1,1,1,1 \
+  stm32_zero_offsets:=0,0,0,0,0,0,0,0,0,0,0,0
 ```
+
+### F.3 STM32 方向与零位标定
+
+F407 路径新增了 `stm32_joint_directions`，固定顺序为
+`L_Joint_1..L_Joint_6,R_Joint_1..R_Joint_6`。每项只能为 `1` 或 `-1`：
+
+```text
+ROS position = direction × (MCU position − zero_offset)
+MCU target   = zero_offset + direction × ROS target
+```
+
+因此方向会同时作用于状态反馈和发送目标。先保持所有项为 `1`，在 F.2
+只读确认反馈后启动 `stm32_moveit.launch.py`，逐轴做一次低速小位移：
+
+```bash
+# 平移轴：+1 mm；转动轴请使用不大于 +0.02 rad 的首测增量
+/usr/bin/python3 test/stm32_joint_jog.py --arm left --joint 1 --delta 0.001 --duration 3
+/usr/bin/python3 test/stm32_joint_jog.py --arm right --joint 4 --delta 0.02 --duration 3
+```
+
+工具以 `/joint_states` 的实际反馈为起点，向已有轨迹控制器发送一条单点
+轨迹，不会自动反向返回。某轴物理正方向与 URDF 不一致时，仅把该轴方向
+改为 `-1`；比例不对则应修正 F407 换算，不能用方向或零偏掩盖。
 
 ### 真机轨迹工具 `test/e5_move_joint.py`
 
@@ -110,6 +140,8 @@ J4–J6 目标硬限制 `--j46-max-deg`（默认 15）。
 3. 双臂 20 Hz 平滑度受 STM32 固件 `AIMOTOR_MINIMAL_MOTION_TEST=1` 限制，实测稳定周期
    约 321 ms（≈3.1 Hz），5 Hz 配置下持续 overrun。
 4. 上述 5 条既有编译警告未修。
+5. F.3 已增加 STM32 MoveIt 启动、逐轴 jog 和重复目标抑制；**仍需要按 12
+   个关节逐项完成方向、比例与零位的真机确认**。
 
 ## 未包含（仍在 `~/tomato/test1`）
 

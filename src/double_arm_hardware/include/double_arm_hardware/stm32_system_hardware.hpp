@@ -124,6 +124,7 @@ private:
     int stm32_state_stale_ms = 1000;
     int stm32_activate_timeout_ms = 10000; // wait_all_valid budget
     std::array<double, 12> stm32_zero_offsets{};
+    std::array<double, 12> stm32_joint_directions{};
     // ── gates ───────────────────────────────────────────────────
     bool enable_hardware = false;     // REAL path confirmed by operator
     bool allow_hardware_io = false;   // may open the serial port (read-only)

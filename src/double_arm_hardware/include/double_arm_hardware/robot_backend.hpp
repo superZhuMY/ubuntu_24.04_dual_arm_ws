@@ -22,12 +22,18 @@ class IRobotBackend
 public:
   virtual ~IRobotBackend() = default;
 
-  /// Per-axis config: canonical name and optional zero offset in SI units
-  /// (metres for J1..J3, radians for J4..J6).
+  /// Per-axis calibration between the ROS/URDF coordinate and the MCU
+  /// coordinate.  `direction` is deliberately restricted to +1/-1: it is
+  /// a coordinate convention, not a scale or a motor calibration.
+  ///
+  ///   ros_position = direction * (mcu_position - zero_offset)
+  ///
+  /// `zero_offset` is in SI units (metres for J1..J3, radians for J4..J6).
   struct AxisConfig
   {
     std::string name;   ///< e.g. "L_Joint_1" — must match ros2_control joints
-    double zero_offset = 0.0;  ///< ros_position = stm32_position - zero_offset
+    double zero_offset = 0.0;
+    double direction = 1.0;
   };
 
   struct HardwareConfig

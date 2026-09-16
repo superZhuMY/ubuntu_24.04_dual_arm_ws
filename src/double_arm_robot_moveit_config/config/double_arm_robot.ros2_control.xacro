@@ -19,7 +19,8 @@
     stm32_device / stm32_baud_rate / stm32_target_ack_timeout_ms
     stm32_state_timeout_ms / stm32_control_ack_timeout_ms
     stm32_state_poll_hz / stm32_state_stale_ms / stm32_activate_timeout_ms
-    stm32_zero_offsets / stm32_read_only / allow_motor_enable
+    stm32_zero_offsets / stm32_joint_directions / stm32_read_only /
+    allow_motor_enable
 
     fake:     mock_components/GenericSystem, 12 joints, velocity ifaces
     dry_run/real + direct_motor: ArmSystemHardware × 2 (unchanged)
@@ -52,6 +53,7 @@
                        stm32_state_stale_ms:=1000
                        stm32_activate_timeout_ms:=10000
                        stm32_zero_offsets:='0,0,0,0,0,0,0,0,0,0,0,0'
+                       stm32_joint_directions:='1,1,1,1,1,1,1,1,1,1,1,1'
                        stm32_read_only:=true
                        allow_motor_enable:=false">
 
@@ -219,6 +221,7 @@
             <param name="stm32_state_stale_ms">${stm32_state_stale_ms}</param>
             <param name="stm32_activate_timeout_ms">${stm32_activate_timeout_ms}</param>
             <param name="stm32_zero_offsets">${stm32_zero_offsets}</param>
+            <param name="stm32_joint_directions">${stm32_joint_directions}</param>
             <param name="stm32_read_only">${'true' if stm32_read_only else 'false'}</param>
             <param name="allow_motor_enable">${'true' if allow_motor_enable else 'false'}</param>
             <param name="enable_hardware">${'true' if hardware_mode == 'real' else 'false'}</param>

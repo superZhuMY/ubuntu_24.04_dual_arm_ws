@@ -20,18 +20,16 @@ std::string read_file(const std::string & path)
   return ss.str();
 }
 
-const std::string kUrdf =
-  std::string("/home/zmy/tomato/test1/src/double_arm_robot_moveit_config/") +
-  "config/double_arm_robot.urdf.xacro";
-const std::string kRos2Ctrl =
-  std::string("/home/zmy/tomato/test1/src/double_arm_robot_moveit_config/") +
-  "config/double_arm_robot.ros2_control.xacro";
-const std::string kF2Launch =
-  std::string("/home/zmy/tomato/test1/src/double_arm_robot_moveit_config/") +
-  "launch/f2_stm32_readonly.launch.py";
-const std::string kF2Yaml =
-  std::string("/home/zmy/tomato/test1/src/double_arm_robot_moveit_config/") +
-  "config/ros2_controllers_f2_stm32_readonly.yaml";
+#ifndef DOUBLE_ARM_MOVEIT_CONFIG_SOURCE_DIR
+#error "DOUBLE_ARM_MOVEIT_CONFIG_SOURCE_DIR must be set by CMake"
+#endif
+
+const std::string kMoveItConfigSource = DOUBLE_ARM_MOVEIT_CONFIG_SOURCE_DIR;
+const std::string kUrdf = kMoveItConfigSource + "/config/double_arm_robot.urdf.xacro";
+const std::string kRos2Ctrl = kMoveItConfigSource + "/config/double_arm_robot.ros2_control.xacro";
+const std::string kF2Launch = kMoveItConfigSource + "/launch/f2_stm32_readonly.launch.py";
+const std::string kMotionLaunch = kMoveItConfigSource + "/launch/stm32_moveit.launch.py";
+const std::string kF2Yaml = kMoveItConfigSource + "/config/ros2_controllers_f2_stm32_readonly.yaml";
 
 }  // namespace
 
@@ -112,6 +110,7 @@ TEST(Stm32Xacro, Stm32BranchPassesGateParams)
   EXPECT_NE(stm32.find("allow_hardware_io"), std::string::npos);
   EXPECT_NE(stm32.find("stm32_control_ack_timeout_ms"), std::string::npos);
   EXPECT_NE(stm32.find("stm32_zero_offsets"), std::string::npos);
+  EXPECT_NE(stm32.find("stm32_joint_directions"), std::string::npos);
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -148,4 +147,15 @@ TEST(Stm32F2Launch, LaunchStartsStateChain)
   EXPECT_NE(launch.find("robot_state_publisher"), std::string::npos);
   EXPECT_NE(launch.find("ros2_control_node"), std::string::npos);
   EXPECT_NE(launch.find("joint_state_broadcaster"), std::string::npos);
+}
+
+TEST(Stm32MoveItLaunch, UsesSingleStm32BackendAndBothControllers)
+{
+  const std::string launch = read_file(kMotionLaunch);
+  ASSERT_FALSE(launch.empty());
+  EXPECT_NE(launch.find("transport_type:=stm32"), std::string::npos);
+  EXPECT_NE(launch.find("stm32_joint_directions"), std::string::npos);
+  EXPECT_NE(launch.find("l_arm"), std::string::npos);
+  EXPECT_NE(launch.find("r_arm"), std::string::npos);
+  EXPECT_NE(launch.find("move_group"), std::string::npos);
 }

@@ -187,6 +187,46 @@ bool Stm32SystemHardware::parse_params()
     }
   }
 
+  // ── coordinate directions: exactly 12 values, each +1 or -1 ──
+  {
+    std::string s = get("stm32_joint_directions", "");
+    p_.stm32_joint_directions.fill(1.0);
+    if (s.empty()) {
+      RCLCPP_WARN(rclcpp::get_logger("Stm32SystemHardware"),
+        "[%s] stm32_joint_directions empty — assuming all +1", info_.name.c_str());
+    } else {
+      std::istringstream ss(s);
+      std::string tok;
+      size_t count = 0;
+      bool bad = false;
+      while (std::getline(ss, tok, ',')) {
+        if (count >= 12) { bad = true; break; }
+        try {
+          p_.stm32_joint_directions[count++] = std::stod(tok);
+        } catch (const std::exception &) {
+          RCLCPP_ERROR(rclcpp::get_logger("Stm32SystemHardware"),
+            "[%s] stm32_joint_directions[%zu] is not a number: '%s'",
+            info_.name.c_str(), count, tok.c_str());
+          return false;
+        }
+      }
+      if (bad || count != 12) {
+        RCLCPP_ERROR(rclcpp::get_logger("Stm32SystemHardware"),
+          "[%s] stm32_joint_directions must have exactly 12 values, got %zu",
+          info_.name.c_str(), bad ? 13 : count);
+        return false;
+      }
+      for (double v : p_.stm32_joint_directions) {
+        if (v != 1.0 && v != -1.0) {
+          RCLCPP_ERROR(rclcpp::get_logger("Stm32SystemHardware"),
+            "[%s] stm32_joint_directions entries must be +1 or -1",
+            info_.name.c_str());
+          return false;
+        }
+      }
+    }
+  }
+
   if (p_.stm32_device.empty()) {
     RCLCPP_ERROR(rclcpp::get_logger("Stm32SystemHardware"),
       "[%s] stm32_device must be configured (prefer /dev/serial/by-id/...)",
@@ -334,6 +374,7 @@ bool Stm32SystemHardware::init_transport()
     IRobotBackend::AxisConfig ac;
     ac.name = Stm32Protocol::axis_name(axis);
     ac.zero_offset = p_.stm32_zero_offsets[axis];
+    ac.direction = p_.stm32_joint_directions[axis];
     cfg.axes.push_back(ac);
   }
   if (!backend_->configure(cfg)) {

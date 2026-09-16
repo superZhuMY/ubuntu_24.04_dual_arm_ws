@@ -733,6 +733,24 @@ TEST(Stm32SysParams, OffsetWithNaNRejected)
   EXPECT_EQ(hw->on_init(info), CallbackReturn::ERROR);
 }
 
+TEST(Stm32SysParams, InvalidDirectionRejected)
+{
+  auto info = make_info("Arm");
+  info.hardware_parameters["stm32_joint_directions"] =
+    "1,1,1,1,1,1,1,1,1,1,1,0";
+  auto hw = std::make_shared<Stm32SystemHardware>();
+  EXPECT_EQ(hw->on_init(info), CallbackReturn::ERROR);
+}
+
+TEST(Stm32SysParams, ThirteenDirectionsRejected)
+{
+  auto info = make_info("Arm");
+  info.hardware_parameters["stm32_joint_directions"] =
+    "1,1,1,1,1,1,1,1,1,1,1,1,1";
+  auto hw = std::make_shared<Stm32SystemHardware>();
+  EXPECT_EQ(hw->on_init(info), CallbackReturn::ERROR);
+}
+
 TEST(Stm32SysParams, StaleWindowTooSmallForPollHzRejected)
 {
   auto info = make_info("Arm");

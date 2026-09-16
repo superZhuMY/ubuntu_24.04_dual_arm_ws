@@ -53,8 +53,10 @@ namespace double_arm_hardware
 ///
 /// SI conversion is the ONLY conversion done here (no pulse / gear-ratio /
 /// differential / sign correction — those live inside the STM32):
-///   write: wire_value = (ros_value + zero_offset) * 1e6   (µm / µrad)
-///   read:  ros_value  = wire_value * 1e-6 - zero_offset   (m / rad)
+///   write: wire_value = (zero_offset + direction * ros_value) * 1e6
+///   read:  ros_value  = direction * (wire_value * 1e-6 - zero_offset)
+/// where direction is exactly +1 or -1.  Pulse, gear-ratio and wrist
+/// coupling conversions remain exclusively in the STM32 firmware.
 class Stm32Backend : public IRobotBackend
 {
 public:
@@ -206,6 +208,7 @@ private:
     bool configured = false;
     std::string name;
     double zero_offset = 0.0;
+    double direction = 1.0;
   };
 
   bool configured_ = false;
@@ -223,6 +226,11 @@ private:
   mutable std::mutex cache_mtx_;
   std::array<double, 12> latest_command_{};   // SI units, always valid
   std::array<bool, 2> arm_dirty_{false, false};  // left / right new target
+  // Last requested wire values.  ros2_control calls write() continuously;
+  // compare after SI->integer conversion so an unchanged target does not
+  // repeatedly restart a firmware point-to-point transaction.
+  std::array<int32_t, 12> latest_wire_command_{};
+  std::array<bool, 2> arm_command_initialized_{false, false};
   std::array<double, 12> latest_state_{};     // SI units, last known value
   std::array<bool, 12> state_valid_{};
   uint8_t control_state_ = Stm32Protocol::CTRL_DISABLED;
@@ -297,6 +305,8 @@ inline bool Stm32Backend::configure(const HardwareConfig & cfg)
     s.configured = true;
     s.name = cfg.axes[i].name;
     s.zero_offset = cfg.axes[i].zero_offset;
+    s.direction = cfg.axes[i].direction;
+    if (s.direction != 1.0 && s.direction != -1.0) return false;
   }
   configured_ = true;
   return true;
@@ -471,9 +481,30 @@ inline bool Stm32Backend::write_targets(const std::array<double, 12> & targets)
   std::lock_guard<std::mutex> lock(cache_mtx_);
   // Hard gates: mode, target gate, link freshness and motion preconditions.
   if (!motion_ready_locked()) return false;
+
+  std::array<bool, 2> changed{false, false};
+  for (int axis = 0; axis < 12; ++axis) {
+    const AxisSlot & slot = axis_map_[axis];
+    const double wire_si = slot.zero_offset + slot.direction * targets[axis];
+    const double wire = wire_si * 1e6;
+    const int arm = axis / 6;
+    // Leave final validity/range reporting to send_arm_target(), but make
+    // malformed values dirty so they cannot be silently suppressed here.
+    if (!std::isfinite(wire) || wire < -2147483648.0 || wire > 2147483647.0) {
+      changed[arm] = true;
+      continue;
+    }
+    const int32_t rounded = static_cast<int32_t>(std::llround(wire));
+    if (!arm_command_initialized_[arm] || latest_wire_command_[axis] != rounded) {
+      changed[arm] = true;
+    }
+    latest_wire_command_[axis] = rounded;
+  }
   latest_command_ = targets;
-  arm_dirty_[0] = true;
-  arm_dirty_[1] = true;
+  for (int arm = 0; arm < 2; ++arm) {
+    arm_dirty_[arm] = arm_dirty_[arm] || changed[arm];
+    arm_command_initialized_[arm] = true;
+  }
   return true;
 }
 
@@ -508,6 +539,8 @@ inline void Stm32Backend::reset()
   std::lock_guard<std::mutex> lock(cache_mtx_);
   latest_command_ = {};
   arm_dirty_ = {false, false};
+  latest_wire_command_ = {};
+  arm_command_initialized_ = {false, false};
   latest_state_ = {};
   state_valid_ = {};
   control_state_ = Stm32Protocol::CTRL_DISABLED;
@@ -705,8 +738,8 @@ inline bool Stm32Backend::send_arm_target(uint8_t arm)
   Stm32Protocol::Target t;
   t.arm = arm;
   for (int i = 0; i < 6; ++i) {
-    const double offset = axis_map_[arm * 6 + i].zero_offset;
-    const double v = si[i] + offset;   // SI, with offset
+    const AxisSlot & slot = axis_map_[arm * 6 + i];
+    const double v = slot.zero_offset + slot.direction * si[i];
     if (!std::isfinite(v)) {
       std::lock_guard<std::mutex> lock(cache_mtx_);
       ++stats_.target_rejected[arm];
@@ -786,10 +819,11 @@ inline void Stm32Backend::apply_state_locked(const Stm32Protocol::State & st)
 
   for (int axis = 0; axis < 12; ++axis) {
     if (Stm32Protocol::axis_valid(st, axis)) {
-      // wire (µm/µrad) → SI (m/rad), minus the zero offset.
-      const double offset = axis_map_[axis].zero_offset;
-      latest_state_[axis] = static_cast<double>(st.position[axis]) * 1e-6 -
-                            offset;
+      // Wire (µm/µrad) → SI (m/rad) with the configured coordinate
+      // direction and zero offset.
+      const AxisSlot & slot = axis_map_[axis];
+      latest_state_[axis] = slot.direction *
+        (static_cast<double>(st.position[axis]) * 1e-6 - slot.zero_offset);
       state_valid_[axis] = true;
     } else {
       // No fresh read-back this frame: keep the last known value, mark

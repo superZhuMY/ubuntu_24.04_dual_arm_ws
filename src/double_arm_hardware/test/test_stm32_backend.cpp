@@ -219,6 +219,38 @@ TEST(Stm32BackendStartup, FirstTargetEqualsFeedback)
   EXPECT_EQ(trg.joint[0], 3000000);
 }
 
+TEST(Stm32BackendCalibration, DirectionAndOffsetApplyToBothWays)
+{
+  BF f;
+  IRobotBackend::HardwareConfig cfg;
+  for (int i = 0; i < 12; ++i) {
+    IRobotBackend::AxisConfig axis{Stm32Protocol::axis_name(i), 0.0};
+    if (i == 0) {
+      axis.zero_offset = 0.1;
+      axis.direction = -1.0;
+    }
+    cfg.axes.push_back(axis);
+  }
+  ASSERT_TRUE(f.be->configure(cfg));
+  f.connect_ok();
+  std::array<int32_t, 12> pos{};
+  pos[0] = 600000;  // MCU = +0.6 m -> ROS = -(0.6 - 0.1) = -0.5 m
+  f.full_valid(pos);
+  ASSERT_TRUE(f.be->wait_all_valid(2000));
+  std::array<double, 12> feedback{};
+  ASSERT_TRUE(f.be->current_feedback(feedback));
+  EXPECT_DOUBLE_EQ(feedback[0], -0.5);
+
+  f.open_gate();
+  std::array<double, 12> target{};
+  target[0] = 0.25;  // MCU = 0.1 + (-1 * 0.25) = -0.15 m
+  ASSERT_TRUE(f.be->write_targets(target));
+  f.be->service_step();
+  const auto sent = collect_targets(f.mock->sent_frames());
+  ASSERT_EQ(sent.size(), 2u);
+  EXPECT_EQ(sent[0].joint[0], -150000);
+}
+
 // ══════════════════════════════════════════════════════════════════
 //  valid-bitmap retention: never publish placeholder 0
 // ══════════════════════════════════════════════════════════════════
@@ -274,6 +306,35 @@ TEST(Stm32BackendWrite, NoUnboundedQueue)
   EXPECT_EQ(targets[0].arm, 0);
   EXPECT_EQ(targets[0].joint[0], 9999 * 1000)
     << "Latest value only (9.999 m → 9,999,000 µm)";
+}
+
+TEST(Stm32BackendWrite, UnchangedIntegerTargetIsNotResent)
+{
+  BF f;
+  f.connect_ok();
+  std::array<int32_t, 12> pos{};
+  f.full_valid(pos);
+  ASSERT_TRUE(f.be->wait_all_valid(2000));
+  f.open_gate();
+
+  std::array<double, 12> target{};
+  target[0] = 0.001;  // L_J1 only
+  ASSERT_TRUE(f.be->write_targets(target));
+  f.be->service_step();
+  EXPECT_EQ(collect_targets(f.mock->sent_frames()).size(), 2u);
+
+  // ros2_control calls write() every update cycle, including while holding.
+  // The equal wire target must not start another transaction for either arm.
+  ASSERT_TRUE(f.be->write_targets(target));
+  f.be->service_step();
+  EXPECT_EQ(collect_targets(f.mock->sent_frames()).size(), 2u);
+
+  target[3] = 0.001;  // Then only the left arm becomes dirty.
+  ASSERT_TRUE(f.be->write_targets(target));
+  f.be->service_step();
+  const auto sent = collect_targets(f.mock->sent_frames());
+  ASSERT_EQ(sent.size(), 3u);
+  EXPECT_EQ(sent.back().arm, 0);
 }
 
 // ══════════════════════════════════════════════════════════════════

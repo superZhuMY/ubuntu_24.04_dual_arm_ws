@@ -187,6 +187,8 @@ if(BUILD_TESTING)
   ament_add_gtest(test_stm32_xacro
     test/test_stm32_xacro.cpp
   )
+  target_compile_definitions(test_stm32_xacro PRIVATE
+    DOUBLE_ARM_MOVEIT_CONFIG_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../double_arm_robot_moveit_config")
   ament_target_dependencies(test_stm32_xacro rclcpp)
 endif()
 

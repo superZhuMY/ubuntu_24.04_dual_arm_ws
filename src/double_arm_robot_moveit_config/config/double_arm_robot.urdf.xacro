@@ -26,6 +26,7 @@
     <xacro:arg name="stm32_state_stale_ms" default="1000" />
     <xacro:arg name="stm32_activate_timeout_ms" default="10000" />
     <xacro:arg name="stm32_zero_offsets" default="0,0,0,0,0,0,0,0,0,0,0,0" />
+    <xacro:arg name="stm32_joint_directions" default="1,1,1,1,1,1,1,1,1,1,1,1" />
     <xacro:arg name="stm32_read_only" default="true" />
     <xacro:arg name="allow_motor_enable" default="false" />
 
@@ -62,6 +63,7 @@
       stm32_state_stale_ms="$(arg stm32_state_stale_ms)"
       stm32_activate_timeout_ms="$(arg stm32_activate_timeout_ms)"
       stm32_zero_offsets="$(arg stm32_zero_offsets)"
+      stm32_joint_directions="$(arg stm32_joint_directions)"
       stm32_read_only="$(arg stm32_read_only)"
       allow_motor_enable="$(arg allow_motor_enable)"/>
 

@@ -27,10 +27,16 @@ from launch_ros.substitutions import FindPackageShare
 
 def generate_launch_description():
     args = {
-        "hardware_mode": ("real", ["fake", "dry_run", "real"]),
-        "transport_type": ("stm32", ["direct_motor", "stm32"]),
-        "stm32_read_only": ("true", ["true", "false"]),
-        "allow_motor_enable": ("false", ["true", "false"]),
+        "stm32_device": ("/dev/serial/by-id/usb-AIMotor_F407", None),
+        "stm32_baud_rate": ("115200", None),
+        "stm32_target_ack_timeout_ms": ("200", None),
+        "stm32_state_timeout_ms": ("200", None),
+        "stm32_control_ack_timeout_ms": ("10000", None),
+        "stm32_state_poll_hz": ("20.0", None),
+        "stm32_state_stale_ms": ("1000", None),
+        "stm32_activate_timeout_ms": ("10000", None),
+        "stm32_zero_offsets": ("0,0,0,0,0,0,0,0,0,0,0,0", None),
+        "stm32_joint_directions": ("1,1,1,1,1,1,1,1,1,1,1,1", None),
     }
     decls = []
     lcs = {}
@@ -45,14 +51,24 @@ def generate_launch_description():
     robot_desc = {
         "robot_description":
             Command(["xacro ", urdf_xacro_path,
-                     " hardware_mode:=", lcs["hardware_mode"],
-                     " transport_type:=", lcs["transport_type"],
+                     " hardware_mode:=real",
+                     " transport_type:=stm32",
                      " test_arm:=none",
                      " e3_safe_hold:=false",
                      " e3_preview_only:=false",
                      " e4_home:=false",
-                     " stm32_read_only:=", lcs["stm32_read_only"],
-                     " allow_motor_enable:=", lcs["allow_motor_enable"]])
+                     " stm32_device:=", lcs["stm32_device"],
+                     " stm32_baud_rate:=", lcs["stm32_baud_rate"],
+                     " stm32_target_ack_timeout_ms:=", lcs["stm32_target_ack_timeout_ms"],
+                     " stm32_state_timeout_ms:=", lcs["stm32_state_timeout_ms"],
+                     " stm32_control_ack_timeout_ms:=", lcs["stm32_control_ack_timeout_ms"],
+                     " stm32_state_poll_hz:=", lcs["stm32_state_poll_hz"],
+                     " stm32_state_stale_ms:=", lcs["stm32_state_stale_ms"],
+                     " stm32_activate_timeout_ms:=", lcs["stm32_activate_timeout_ms"],
+                     " stm32_zero_offsets:=", lcs["stm32_zero_offsets"],
+                     " stm32_joint_directions:=", lcs["stm32_joint_directions"],
+                     " stm32_read_only:=true",
+                     " allow_motor_enable:=false"])
     }
 
     # F.2 read-only controller set: joint_state_broadcaster ONLY.
