@@ -3,7 +3,7 @@
 从 `~/tomato/test1` 分离出的活跃工程。**含可直接构建、已验证的源码**，已剔除历史 zip 快照与一次性参考资料。
 
 - 平台：Ubuntu 24.04 + ROS 2 Jazzy
-- 本工作区构建状态：4 包通过；`double_arm_hardware` 294 用例 / 0 失败
+- 当前源码包含 5 个 ROS2 包；原有硬件包构建基线为 294 用例 / 0 失败
 - 源码来源：`test1/src/`（与 `test1/src_v8.zip` 逐文件一致，零差异）
 
 ## 目录结构
@@ -11,6 +11,7 @@
 ```
 src/
   double_arm_hardware/            核心包：硬件插件 + 协议 + 传输层 + readonly_check
+  double_arm_sparse_execution/    STM32轨迹自动稀疏化 + 到位后逐点执行
   double_arm_robot/               URDF/xacro、mesh、显示 launch
   double_arm_robot_moveit_config/ SRDF、kinematics、控制器 YAML、全部 launch
   double_arm_jaka_interfaces/     自定义 msg/srv/action
@@ -82,12 +83,39 @@ ros2 launch double_arm_robot_moveit_config e5_moveit.launch.py \
 ros2 launch double_arm_robot_moveit_config f2_stm32_readonly.launch.py \
   stm32_device:=/dev/ttyUSB0
 
-# STM32 + MoveIt（首次先用下面的逐轴工具确认方向；尚未完成真机验证）
+# STM32 + MoveIt（默认稀疏执行；首次先用下面的逐轴工具确认方向）
 ros2 launch double_arm_robot_moveit_config stm32_moveit.launch.py \
   stm32_device:=/dev/ttyUSB0 \
   stm32_joint_directions:=1,1,1,1,1,1,1,1,1,1,1,1 \
   stm32_zero_offsets:=0,0,0,0,0,0,0,0,0,0,0,0
 ```
+
+### STM32 稀疏轨迹执行
+
+`stm32_moveit.launch.py` 默认使用 `execution_mode:=sparse`。MoveIt 的规划、
+碰撞检查和 `FollowJointTrajectory` 接口保持不变，但不再由
+`JointTrajectoryController` 按 5 Hz 连续插值。执行节点自动保留起终点、
+明显转向点和步长限制点，并用 `/check_state_validity` 重新检查拟议捷径；
+每个保留点只下发一次，真实反馈连续到位后才进入下一点。
+
+```bash
+# 推荐：STM32点到点电机使用稀疏执行
+ros2 launch double_arm_robot_moveit_config stm32_moveit.launch.py \
+  stm32_device:=/dev/ttyUSB0 execution_mode:=sparse
+
+# 仅作对比：原JointTrajectoryController连续插值路径
+ros2 launch double_arm_robot_moveit_config stm32_moveit.launch.py \
+  stm32_device:=/dev/ttyUSB0 execution_mode:=continuous
+```
+
+稀疏参数位于
+`src/double_arm_sparse_execution/config/sparse_execution.yaml`。首轮建议保持默认值，
+实测后主要调整 `max_prismatic_step`、`max_revolute_step` 与到位容差。默认
+`allow_simultaneous_arms: false`，方向和零位确认阶段只允许一只臂执行；双臂同步
+执行器将在单臂验证完成后再接入。
+
+> 稀疏执行会显著减少 AI 电机的点到点事务次数，但每个保留点仍会执行固件原有
+> `STOP → WRITE → TRIGGER` 流程。本改动不修改 F407 和 AI 电机流程。
 
 ### F.3 STM32 方向与零位标定
 
@@ -140,7 +168,7 @@ J4–J6 目标硬限制 `--j46-max-deg`（默认 15）。
 3. 双臂 20 Hz 平滑度受 STM32 固件 `AIMOTOR_MINIMAL_MOTION_TEST=1` 限制，实测稳定周期
    约 321 ms（≈3.1 Hz），5 Hz 配置下持续 overrun。
 4. 上述 5 条既有编译警告未修。
-5. F.3 已增加 STM32 MoveIt 启动、逐轴 jog 和重复目标抑制；**仍需要按 12
+5. F.3 已增加 STM32 MoveIt 启动、稀疏离散执行、逐轴 jog 和重复目标抑制；**仍需要按 12
    个关节逐项完成方向、比例与零位的真机确认**。
 
 ## 未包含（仍在 `~/tomato/test1`）

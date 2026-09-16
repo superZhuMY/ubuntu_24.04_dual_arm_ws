@@ -30,6 +30,8 @@ const std::string kRos2Ctrl = kMoveItConfigSource + "/config/double_arm_robot.ro
 const std::string kF2Launch = kMoveItConfigSource + "/launch/f2_stm32_readonly.launch.py";
 const std::string kMotionLaunch = kMoveItConfigSource + "/launch/stm32_moveit.launch.py";
 const std::string kF2Yaml = kMoveItConfigSource + "/config/ros2_controllers_f2_stm32_readonly.yaml";
+const std::string kSparseYaml =
+  kMoveItConfigSource + "/config/ros2_controllers_stm32_sparse.yaml";
 
 }  // namespace
 
@@ -158,4 +160,16 @@ TEST(Stm32MoveItLaunch, UsesSingleStm32BackendAndBothControllers)
   EXPECT_NE(launch.find("l_arm"), std::string::npos);
   EXPECT_NE(launch.find("r_arm"), std::string::npos);
   EXPECT_NE(launch.find("move_group"), std::string::npos);
+  EXPECT_NE(launch.find("execution_mode"), std::string::npos);
+  EXPECT_NE(launch.find("double_arm_sparse_execution"), std::string::npos);
+}
+
+TEST(Stm32MoveItLaunch, SparseControllersDoNotInterpolate)
+{
+  const std::string yaml = read_file(kSparseYaml);
+  ASSERT_FALSE(yaml.empty());
+  EXPECT_NE(yaml.find("ForwardCommandController"), std::string::npos);
+  EXPECT_NE(yaml.find("l_arm_position"), std::string::npos);
+  EXPECT_NE(yaml.find("r_arm_position"), std::string::npos);
+  EXPECT_EQ(yaml.find("JointTrajectoryController"), std::string::npos);
 }

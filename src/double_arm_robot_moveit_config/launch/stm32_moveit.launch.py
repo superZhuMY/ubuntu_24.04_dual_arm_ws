@@ -3,6 +3,8 @@
 This is intentionally separate from e5_moveit.launch.py, which remains the
 verified direct-motor path.  Activation synchronises commands to feedback
 before enabling, therefore opening this launch never commands a zero pose.
+The default sparse mode replaces continuous JointTrajectoryController
+interpolation with one command per automatically retained waypoint.
 
 Use f2_stm32_readonly.launch.py first to determine the 12 direction signs and
 zero offsets.  This launch then starts the same MoveIt/controller topology as
@@ -14,8 +16,14 @@ import os
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.conditions import IfCondition
-from launch.substitutions import Command, LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import (
+    Command,
+    LaunchConfiguration,
+    PathJoinSubstitution,
+    PythonExpression,
+)
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 from moveit_configs_utils import MoveItConfigsBuilder
 
@@ -36,6 +44,9 @@ def generate_launch_description():
         "stm32_read_only": ("false", ["true", "false"]),
         "allow_motor_enable": ("true", ["true", "false"]),
         "start_rviz": ("true", ["true", "false"]),
+        # sparse: one target per retained waypoint, feedback-gated advance.
+        # continuous: legacy JointTrajectoryController path for comparison.
+        "execution_mode": ("sparse", ["sparse", "continuous"]),
     }
     decls = []
     lcs = {}
@@ -76,7 +87,19 @@ def generate_launch_description():
     }
 
     config_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "config")
-    controllers_file = os.path.join(config_dir, "ros2_controllers_e4.yaml")
+    continuous_controllers_file = os.path.join(
+        config_dir, "ros2_controllers_e4.yaml")
+    sparse_controllers_file = os.path.join(
+        config_dir, "ros2_controllers_stm32_sparse.yaml")
+    sparse_execution_file = PathJoinSubstitution(
+        [FindPackageShare("double_arm_sparse_execution"),
+         "config", "sparse_execution.yaml"])
+    sparse_condition = IfCondition(PythonExpression([
+        "'", lcs["execution_mode"], "' == 'sparse'"
+    ]))
+    continuous_condition = IfCondition(PythonExpression([
+        "'", lcs["execution_mode"], "' == 'continuous'"
+    ]))
     rviz_cfg = PathJoinSubstitution(
         [FindPackageShare("double_arm_robot_moveit_config"), "config", "moveit.rviz"])
     moveit_params = [
@@ -88,6 +111,16 @@ def generate_launch_description():
         moveit_config.pilz_cartesian_limits,
         moveit_config.trajectory_execution,
     ]
+    move_group_params = moveit_params + [
+        # Sparse execution is governed by feedback and its own per-waypoint
+        # timeout, not by the much shorter time stamps in MoveIt's plan.
+        {"trajectory_execution.execution_duration_monitoring": ParameterValue(
+            PythonExpression([
+                "'", lcs["execution_mode"], "' != 'sparse'"
+            ]),
+            value_type=bool,
+        )},
+    ]
 
     nodes = [
         Node(package="tf2_ros", executable="static_transform_publisher",
@@ -96,18 +129,49 @@ def generate_launch_description():
         Node(package="robot_state_publisher", executable="robot_state_publisher",
              output="screen", parameters=[robot_desc]),
         Node(package="controller_manager", executable="ros2_control_node",
-             namespace="double_arm_robot", output="screen", parameters=[controllers_file],
+             namespace="double_arm_robot", output="screen",
+             parameters=[continuous_controllers_file],
+             condition=continuous_condition,
+             remappings=[
+                 ("/double_arm_robot/robot_description", "/robot_description"),
+                 ("/double_arm_robot/joint_states", "/joint_states"),
+             ]),
+        Node(package="controller_manager", executable="ros2_control_node",
+             namespace="double_arm_robot", output="screen",
+             parameters=[sparse_controllers_file],
+             condition=sparse_condition,
              remappings=[
                  ("/double_arm_robot/robot_description", "/robot_description"),
                  ("/double_arm_robot/joint_states", "/joint_states"),
              ]),
     ]
-    for controller in ["l_arm", "r_arm", "joint_state_broadcaster"]:
+    for controller in ["l_arm", "r_arm"]:
         nodes.append(Node(
             package="controller_manager", executable="spawner", output="screen",
             arguments=[controller, "--controller-manager",
                        "/double_arm_robot/controller_manager"],
+            condition=continuous_condition,
         ))
+    for controller in ["l_arm_position", "r_arm_position"]:
+        nodes.append(Node(
+            package="controller_manager", executable="spawner", output="screen",
+            arguments=[controller, "--controller-manager",
+                       "/double_arm_robot/controller_manager"],
+            condition=sparse_condition,
+        ))
+    nodes.append(Node(
+        package="controller_manager", executable="spawner", output="screen",
+        arguments=["joint_state_broadcaster", "--controller-manager",
+                   "/double_arm_robot/controller_manager"],
+    ))
+    nodes.append(Node(
+        package="double_arm_sparse_execution",
+        executable="sparse_trajectory_executor",
+        name="sparse_trajectory_executor",
+        output="screen",
+        parameters=[sparse_execution_file],
+        condition=sparse_condition,
+    ))
     nodes.append(Node(
         package="moveit_ros_move_group", executable="move_group", output="screen",
         remappings=[
@@ -116,7 +180,7 @@ def generate_launch_description():
             ("r_arm/follow_joint_trajectory",
              "/double_arm_robot/r_arm/follow_joint_trajectory"),
         ],
-        parameters=moveit_params,
+        parameters=move_group_params,
     ))
     nodes.append(Node(
         package="rviz2", executable="rviz2", name="rviz2", output="screen",

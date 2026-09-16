@@ -1,0 +1,39 @@
+# STM32 sparse execution controllers.
+#
+# The two ForwardCommandControllers hold one position command until the sparse
+# executor publishes the next feedback-gated waypoint.  They deliberately do
+# not perform time interpolation.
+
+/double_arm_robot/controller_manager:
+  ros__parameters:
+    update_rate: 5
+
+    l_arm_position:
+      type: forward_command_controller/ForwardCommandController
+
+    r_arm_position:
+      type: forward_command_controller/ForwardCommandController
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+/double_arm_robot/l_arm_position:
+  ros__parameters:
+    joints:
+      - L_Joint_1
+      - L_Joint_2
+      - L_Joint_3
+      - L_Joint_4
+      - L_Joint_5
+      - L_Joint_6
+    interface_name: position
+/double_arm_robot/r_arm_position:
+  ros__parameters:
+    joints:
+      - R_Joint_1
+      - R_Joint_2
+      - R_Joint_3
+      - R_Joint_4
+      - R_Joint_5
+      - R_Joint_6
+    interface_name: position

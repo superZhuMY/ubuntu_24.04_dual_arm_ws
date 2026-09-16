@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>double_arm_sparse_execution</name>
+  <version>0.1.0</version>
+  <description>Sparse feedback-gated trajectory execution for the STM32 dual arm.</description>
+  <maintainer email="3262393329@qq.com">gzh</maintainer>
+  <license>BSD-3-Clause</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>control_msgs</exec_depend>
+  <exec_depend>trajectory_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>moveit_msgs</exec_depend>
+
+  <test_depend>ament_pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
