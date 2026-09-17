@@ -9,7 +9,6 @@ ros2_control update cycle.
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
 from functools import partial
 import math
@@ -26,6 +25,7 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
+from rclpy.task import Future
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64MultiArray
 from trajectory_msgs.msg import JointTrajectoryPoint
@@ -297,12 +297,26 @@ class SparseTrajectoryExecutor(Node):
         result.error_string = message
         return result
 
+    async def _sleep(self, seconds: float) -> None:
+        """Executor-compatible sleep.
+
+        Coroutines run by the rclpy executor have no asyncio event loop, so
+        ``await asyncio.sleep`` raises ``RuntimeError: no running event loop``.
+        Await an rclpy Future resolved by a one-shot ROS timer instead.
+        """
+        future = Future()
+        timer = self.create_timer(
+            seconds, lambda: future.set_result(True), callback_group=self._group
+        )
+        future.add_done_callback(lambda _: timer.cancel())
+        await future
+
     async def _collision_service_ready(self) -> bool:
         deadline = time.monotonic() + self._collision_service_timeout
         while time.monotonic() < deadline:
             if self._validity_client.service_is_ready():
                 return True
-            await asyncio.sleep(0.1)
+            await self._sleep(0.1)
         return False
 
     async def _protect_collision_segments(
@@ -396,7 +410,7 @@ class SparseTrajectoryExecutor(Node):
             self._publish_feedback(spec, goal_handle, target, actual, errors)
             if stable >= self._stable_samples:
                 return None
-            await asyncio.sleep(self._feedback_period)
+            await self._sleep(self._feedback_period)
         return f"waypoint {sequence}/{total} timed out after {self._waypoint_timeout:.1f}s"
 
     def _publish_feedback(
