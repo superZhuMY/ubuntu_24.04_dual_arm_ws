@@ -1,7 +1,7 @@
 import math
 import unittest
 
-from double_arm_sparse_execution.sparse_filter import select_sparse_indices
+from double_arm_sparse_execution.sparse_filter import hybrid_target, select_sparse_indices
 
 
 def select(points, **kwargs):
@@ -51,6 +51,45 @@ class SparseFilterTest(unittest.TestCase):
             select([[0.0, 0.0], [0.02, 0.0]], steps=[0.01, 1.0]),
             [0, 1],
         )
+
+    def test_hybrid_target_keeps_prismatic_target_constant(self):
+        command, progress = hybrid_target(
+            [0.0, 0.0, 0.0, 0.0, 0.2, -0.2],
+            [1.0, 2.0, 0.0, 1.0, 0.6, 0.2],
+            [0.5, 1.0, 0.0, 0.0, 0.2, -0.2],
+        )
+        self.assertEqual(command[:3], [1.0, 2.0, 0.0])
+        self.assertAlmostEqual(progress, 0.5)
+        self.assertEqual(command[3:], [0.5, 0.4, 0.0])
+
+    def test_hybrid_target_follows_slowest_prismatic_axis(self):
+        command, progress = hybrid_target(
+            [0.0] * 6,
+            [1.0, 2.0, 0.0, 0.4, 0.8, 1.2],
+            [0.75, 0.5, 0.0, 0.0, 0.0, 0.0],
+        )
+        self.assertAlmostEqual(progress, 0.25)
+        self.assertEqual(command[:3], [1.0, 2.0, 0.0])
+        self.assertEqual(command[3:], [0.1, 0.2, 0.3])
+
+    def test_hybrid_target_handles_negative_prismatic_motion(self):
+        command, progress = hybrid_target(
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.6, 0.0, 0.0],
+            [0.6, 0.0, 0.0, 0.0, 0.0, 0.0],
+        )
+        self.assertAlmostEqual(progress, 0.4)
+        self.assertAlmostEqual(command[3], 0.24)
+
+    def test_hybrid_target_sends_wrist_only_move_directly(self):
+        target = [0.0, 0.0, 0.0, 0.3, -0.2, 0.1]
+        command, progress = hybrid_target([0.0] * 6, target, [0.0] * 6)
+        self.assertEqual(progress, 1.0)
+        self.assertEqual(command, target)
+
+    def test_hybrid_target_rejects_wrong_dimension(self):
+        with self.assertRaises(ValueError):
+            hybrid_target([0.0] * 5, [0.0] * 6, [0.0] * 6)
 
 
 if __name__ == "__main__":
