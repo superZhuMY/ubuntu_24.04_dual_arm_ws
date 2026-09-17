@@ -1,9 +1,10 @@
-"""MoveIt-compatible hybrid trajectory action server.
+"""MoveIt-compatible sparse trajectory action server.
 
-J1-J3 AI motors receive sparse segment targets because each changed target
-restarts their STOP/WRITE/TRIGGER transaction.  J4-J6 MW motors receive
-feedback-progress wrist updates while J1-J3 remain bit-for-bit constant.
-The normal FollowJointTrajectory interface and collision checks are retained.
+The node accepts the normal FollowJointTrajectory goals used by MoveIt, but
+commands a ForwardCommandController exactly once per retained waypoint.  It
+then waits for real joint feedback to settle before advancing.  This avoids
+feeding a new interpolated target into point-to-point motor drives every
+ros2_control update cycle.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64MultiArray
 from trajectory_msgs.msg import JointTrajectoryPoint
 
-from .sparse_filter import hybrid_target, select_sparse_indices
+from .sparse_filter import select_sparse_indices
 
 
 @dataclass(frozen=True)
@@ -73,11 +74,6 @@ class SparseTrajectoryExecutor(Node):
         self._waypoint_timeout = self._param("waypoint_timeout", 15.0)
         self._state_stale_timeout = self._param("state_stale_timeout", 1.0)
         self._feedback_period = self._param("feedback_period", 0.05)
-        self._hybrid_wrist_streaming = bool(
-            self._param("hybrid_wrist_streaming", True)
-        )
-        self._wrist_update_period = self._param("wrist_update_period", 0.1)
-        self._wrist_command_epsilon = self._param("wrist_command_epsilon", 0.0001)
         self._collision_check = bool(self._param("collision_check", True))
         self._require_collision_service = bool(
             self._param("require_collision_service", True)
@@ -130,10 +126,8 @@ class SparseTrajectoryExecutor(Node):
             for spec in (LEFT, RIGHT)
         ]
         self.get_logger().info(
-            "Hybrid sparse execution ready: J1-J3 sparse targets, "
-            "J4-J6 feedback-progress streaming"
-            if self._hybrid_wrist_streaming
-            else "Sparse execution ready: one command per retained waypoint"
+            "Sparse execution ready: MoveIt action input, one command per retained "
+            "waypoint, feedback-gated advance"
         )
 
     def _param(self, name: str, default):
@@ -151,8 +145,6 @@ class SparseTrajectoryExecutor(Node):
             "waypoint_timeout": self._waypoint_timeout,
             "state_stale_timeout": self._state_stale_timeout,
             "feedback_period": self._feedback_period,
-            "wrist_update_period": self._wrist_update_period,
-            "wrist_command_epsilon": self._wrist_command_epsilon,
             "collision_service_timeout": self._collision_service_timeout,
             "collision_prismatic_resolution": self._collision_prismatic_resolution,
             "collision_revolute_resolution": self._collision_revolute_resolution,
@@ -226,32 +218,14 @@ class SparseTrajectoryExecutor(Node):
         result = FollowJointTrajectory.Result()
         try:
             points = self._ordered_points(spec, goal_handle)
-            # In hybrid mode only J1-J3 determine sparse stops.  J4-J6 are
-            # streamed between those stops and therefore must not create
-            # additional AI-motor stop/write/trigger cycles.
-            filter_points = (
-                [point[:3] for point in points]
-                if self._hybrid_wrist_streaming
-                else points
-            )
-            filter_chords = (
-                [self._prismatic_chord_error] * 3
-                if self._hybrid_wrist_streaming
-                else self._axis_values(
-                    self._prismatic_chord_error, self._revolute_chord_error
-                )
-            )
-            filter_steps = (
-                [self._max_prismatic_step] * 3
-                if self._hybrid_wrist_streaming
-                else self._axis_values(
-                    self._max_prismatic_step, self._max_revolute_step
-                )
-            )
             indices = select_sparse_indices(
-                filter_points,
-                chord_tolerances=filter_chords,
-                max_steps=filter_steps,
+                points,
+                chord_tolerances=self._axis_values(
+                    self._prismatic_chord_error, self._revolute_chord_error
+                ),
+                max_steps=self._axis_values(
+                    self._max_prismatic_step, self._max_revolute_step
+                ),
                 direction_change_degrees=self._direction_change,
             )
             checked = await self._protect_collision_segments(spec, points, indices)
@@ -331,18 +305,11 @@ class SparseTrajectoryExecutor(Node):
         Await an rclpy Future resolved by a one-shot ROS timer instead.
         """
         future = Future()
-
-        def wake_up() -> None:
-            if not future.done():
-                future.set_result(True)
-
         timer = self.create_timer(
-            seconds, wake_up, callback_group=self._group
+            seconds, lambda: future.set_result(True), callback_group=self._group
         )
-        try:
-            await future
-        finally:
-            self.destroy_timer(timer)
+        future.add_done_callback(lambda _: timer.cancel())
+        await future
 
     async def _collision_service_ready(self) -> bool:
         deadline = time.monotonic() + self._collision_service_timeout
@@ -413,25 +380,15 @@ class SparseTrajectoryExecutor(Node):
         sequence: int,
         total: int,
     ) -> Optional[str]:
-        segment_start = self._current_positions(spec)
-        if segment_start is None or not self._state_is_fresh():
+        if self._current_positions(spec) is None or not self._state_is_fresh():
             return "joint feedback is missing or stale before waypoint command"
 
-        if self._hybrid_wrist_streaming:
-            command, progress = hybrid_target(segment_start, target, segment_start)
-        else:
-            command, progress = list(target), 1.0
-
-        # The first hybrid command starts J1-J3 toward the sparse target while
-        # holding J4-J6 at their measured segment-start positions.
-        self._publishers[spec.name].publish(Float64MultiArray(data=command))
-        last_command = command
-        last_wrist_update = time.monotonic()
+        # Exactly one publish per waypoint.  The forward controller holds this
+        # command; Stm32Backend suppresses identical ros2_control writes.
+        self._publishers[spec.name].publish(Float64MultiArray(data=target))
         self.get_logger().info(
-            f"{spec.name} waypoint {sequence}/{total} started "
-            f"(wrist progress {progress:.2f})"
+            f"{spec.name} waypoint {sequence}/{total} sent once"
         )
-
         start = time.monotonic()
         stable = 0
         tolerances = self._axis_values(
@@ -444,45 +401,13 @@ class SparseTrajectoryExecutor(Node):
             actual = self._current_positions(spec)
             if actual is None or not self._state_is_fresh():
                 return "joint feedback became stale while moving"
-
-            now = time.monotonic()
-            if self._hybrid_wrist_streaming:
-                next_command, progress = hybrid_target(
-                    segment_start, target, actual
-                )
-                wrist_changed = any(
-                    abs(new - old) >= self._wrist_command_epsilon
-                    for new, old in zip(next_command[3:], last_command[3:])
-                )
-                final_wrist_needed = (
-                    progress >= 1.0
-                    and any(
-                        abs(desired - sent) >= self._wrist_command_epsilon
-                        for desired, sent in zip(target[3:], last_command[3:])
-                    )
-                )
-                if (
-                    final_wrist_needed
-                    or (
-                        wrist_changed
-                        and now - last_wrist_update >= self._wrist_update_period
-                    )
-                ):
-                    # J1-J3 stay exactly equal to target[:3] on every publish.
-                    # The STM32 therefore updates only the MW wrist motors.
-                    self._publishers[spec.name].publish(
-                        Float64MultiArray(data=next_command)
-                    )
-                    last_command = next_command
-                    last_wrist_update = now
-
             errors = [desired - measured for desired, measured in zip(target, actual)]
             stable = (
                 stable + 1
                 if all(abs(error) <= limit for error, limit in zip(errors, tolerances))
                 else 0
             )
-            self._publish_feedback(spec, goal_handle, last_command, actual, errors)
+            self._publish_feedback(spec, goal_handle, target, actual, errors)
             if stable >= self._stable_samples:
                 return None
             await self._sleep(self._feedback_period)

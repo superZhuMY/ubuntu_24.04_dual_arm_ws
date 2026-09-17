@@ -1,8 +1,7 @@
 /**:
   ros__parameters:
-    # J1-J3 sparse stops. 30 mm reduces AI stop/write/trigger cycles.
-    # Safety checks may still retain additional points.
-    max_prismatic_step: 0.03
+    # Geometric simplification. Safety checks may retain more points.
+    max_prismatic_step: 0.01
     max_revolute_step: 0.05
     prismatic_chord_error: 0.002
     revolute_chord_error: 0.02
@@ -11,16 +10,10 @@
     # Advance only after real feedback remains inside tolerance.
     prismatic_tolerance: 0.002
     revolute_tolerance: 0.02
-    stable_samples: 2
+    stable_samples: 3
     waypoint_timeout: 15.0
     state_stale_timeout: 1.0
     feedback_period: 0.05
-
-    # Hybrid mode: J1-J3 stay fixed at each sparse segment target while
-    # J4-J6 follow measured prismatic progress through latest-target updates.
-    hybrid_wrist_streaming: true
-    wrist_update_period: 0.10
-    wrist_command_epsilon: 0.0001
 
     # Validate every proposed shortcut through MoveIt's current planning scene.
     collision_check: true

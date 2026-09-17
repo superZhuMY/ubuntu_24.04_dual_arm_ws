@@ -3,8 +3,8 @@
 This is intentionally separate from e5_moveit.launch.py, which remains the
 verified direct-motor path.  Activation synchronises commands to feedback
 before enabling, therefore opening this launch never commands a zero pose.
-The default sparse mode uses hybrid execution: sparse J1-J3 AI-motor segment
-targets plus feedback-progress J4-J6 MW wrist updates.
+The default sparse mode replaces continuous JointTrajectoryController
+interpolation with one command per automatically retained waypoint.
 
 Use f2_stm32_readonly.launch.py first to determine the 12 direction signs and
 zero offsets.  This launch then starts the same MoveIt/controller topology as
@@ -44,7 +44,7 @@ def generate_launch_description():
         "stm32_read_only": ("false", ["true", "false"]),
         "allow_motor_enable": ("true", ["true", "false"]),
         "start_rviz": ("true", ["true", "false"]),
-        # sparse: hybrid J1-J3 sparse targets + J4-J6 progress streaming.
+        # sparse: one target per retained waypoint, feedback-gated advance.
         # continuous: legacy JointTrajectoryController path for comparison.
         "execution_mode": ("sparse", ["sparse", "continuous"]),
     }
