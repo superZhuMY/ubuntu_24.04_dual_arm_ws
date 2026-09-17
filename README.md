@@ -28,7 +28,7 @@ docs/                             阶段性报告链与测试日志
 |---|---|---|
 | 插件 | `ArmSystemHardware`（双臂各 1 实例） | `Stm32SystemHardware`（单实例 12 轴） |
 | 链路 | Modbus RTU(J1–J3) + POSIX 串口(J4–J6) → `RealTransport` | 单串口二进制整机协议 → `Stm32Transport` |
-| 真机状态 | ✅ **已验证**：E.2 只读 / E.3 使能保持 / E.4 回零 / E.5 分臂 MoveIt 轨迹全部跑通 | ❌ **从未接真机**，仅 Mock 离线测试通过 |
+| 真机状态 | ✅ **已验证**：E.2 只读 / E.3 使能保持 / E.4 回零 / E.5 分臂 MoveIt 轨迹全部跑通 | ✅ STM32 12 轴链路和稀疏执行已接真机；混合执行待继续调参 |
 | 后续阶段 | E 系列，结论待现场定稿 | F 系列，F.2 真机入口已就绪未启动 |
 
 > 要继续做真机 → 走 `direct_motor`；要迁移 STM32 → 走 `stm32`。
@@ -93,10 +93,14 @@ ros2 launch double_arm_robot_moveit_config stm32_moveit.launch.py \
 ### STM32 稀疏轨迹执行
 
 `stm32_moveit.launch.py` 默认使用 `execution_mode:=sparse`。MoveIt 的规划、
-碰撞检查和 `FollowJointTrajectory` 接口保持不变，但不再由
-`JointTrajectoryController` 按 5 Hz 连续插值。执行节点自动保留起终点、
-明显转向点和步长限制点，并用 `/check_state_validity` 重新检查拟议捷径；
-每个保留点只下发一次，真实反馈连续到位后才进入下一点。
+碰撞检查和 `FollowJointTrajectory` 接口保持不变，但执行方式改为混合策略：
+
+- J1～J3 AI 电机只接收稀疏段目标，减少 `STOP → WRITE → TRIGGER` 次数。
+- J4～J6 MW 电机按照 J1～J3 的真实反馈进度更新最新目标。
+- 每次腕部更新都保持 J1～J3 目标完全相同，依靠 STM32 重复目标抑制避免 AI 重启。
+- 进入下一稀疏段前仍要求六轴真实反馈稳定到位。
+
+稀疏捷径继续由 `/check_state_validity` 检查；不安全的捷径恢复为原始 MoveIt 点。
 
 ```bash
 # 推荐：STM32点到点电机使用稀疏执行
@@ -110,12 +114,12 @@ ros2 launch double_arm_robot_moveit_config stm32_moveit.launch.py \
 
 稀疏参数位于
 `src/double_arm_sparse_execution/config/sparse_execution.yaml`。首轮建议保持默认值，
-实测后主要调整 `max_prismatic_step`、`max_revolute_step` 与到位容差。默认
+实测后主要调整 `max_prismatic_step`、`wrist_update_period` 与到位容差。默认
 `allow_simultaneous_arms: false`，方向和零位确认阶段只允许一只臂执行；双臂同步
 执行器将在单臂验证完成后再接入。
 
-> 稀疏执行会显著减少 AI 电机的点到点事务次数，但每个保留点仍会执行固件原有
-> `STOP → WRITE → TRIGGER` 流程。本改动不修改 F407 和 AI 电机流程。
+> 每个 J1～J3 稀疏段仍执行固件原有 `STOP → WRITE → TRIGGER` 流程；J4～J6
+> 在段内只更新 MW 最新目标。本改动不修改 F407 协议和电机状态机。
 
 ### F.3 STM32 方向与零位标定
 
@@ -163,7 +167,7 @@ J4–J6 目标硬限制 `--j46-max-deg`（默认 15）。
 
 ## 未完成事项
 
-1. E 系列结论标注"待操作者现场观察确认后定稿"；STM32 全程未接真机。
+1. E 系列结论仍需现场定稿；STM32 稀疏路径已接真机，混合 J1～J3/J4～J6 执行仍需继续实测调参。
 2. `on_init` 后 command/state 句柄值需真机用 `/joint_states` 复核。
 3. 双臂 20 Hz 平滑度受 STM32 固件 `AIMOTOR_MINIMAL_MOTION_TEST=1` 限制，实测稳定周期
    约 321 ms（≈3.1 Hz），5 Hz 配置下持续 overrun。
