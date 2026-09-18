@@ -11,7 +11,7 @@
 ```
 src/
   double_arm_hardware/            核心包：硬件插件 + 协议 + 传输层 + readonly_check
-  double_arm_sparse_execution/    STM32轨迹自动稀疏化 + 到位后逐点执行
+  double_arm_sparse_execution/    STM32 连续目标执行 + 终点反馈确认（保留旧稀疏模式）
   double_arm_robot/               URDF/xacro、mesh、显示 launch
   double_arm_robot_moveit_config/ SRDF、kinematics、控制器 YAML、全部 launch
   double_arm_jaka_interfaces/     自定义 msg/srv/action
@@ -83,43 +83,44 @@ ros2 launch double_arm_robot_moveit_config e5_moveit.launch.py \
 ros2 launch double_arm_robot_moveit_config f2_stm32_readonly.launch.py \
   stm32_device:=/dev/ttyUSB0
 
-# STM32 + MoveIt（默认稀疏执行；首次先用下面的逐轴工具确认方向）
+# STM32 + MoveIt（默认 streaming 执行；首次先用下面的逐轴工具确认方向）
 ros2 launch double_arm_robot_moveit_config stm32_moveit.launch.py \
   stm32_device:=/dev/ttyUSB0 \
   stm32_joint_directions:=1,1,1,1,1,1,1,1,1,1,1,1 \
   stm32_zero_offsets:=0,0,0,0,0,0,0,0,0,0,0,0
 ```
 
-### STM32 稀疏轨迹执行
+### STM32 连续目标执行（本分支待上机验证）
 
-`stm32_moveit.launch.py` 默认使用 `execution_mode:=sparse`。MoveIt 的规划、
-碰撞检查和 `FollowJointTrajectory` 接口保持不变，但执行方式改为混合策略：
+`stm32_moveit.launch.py` 默认 `execution_mode:=streaming`：保留 MoveIt 规划和
+FollowJointTrajectory 接口，中间目标按原始时间轴做位置线性采样，不再逐段等待到位。
+转向点、明显拐角和精确终点强制发送；只在终点等待新的反馈持续稳定 0.3 秒后返回成功。
+跟随误差过大时暂停轨迹时间，持续跟不上则中止，避免下一阶段在上一阶段未完成时开始。
 
-- J1～J3 AI 电机只接收稀疏段目标，减少 `STOP → WRITE → TRIGGER` 次数。
-- J4～J6 MW 电机按照 J1～J3 的真实反馈进度更新最新目标。
-- 每次腕部更新都保持 J1～J3 目标完全相同，依靠 STM32 重复目标抑制避免 AI 重启。
-- 进入下一稀疏段前仍要求六轴真实反馈稳定到位。
-
-稀疏捷径继续由 `/check_state_validity` 检查；不安全的捷径恢复为原始 MoveIt 点。
+默认控制器 10 Hz；执行器检查周期 50 ms，AI/MW 目标更新间隔分别为 100 ms。
+AI 小于 0.2 mm、MW 小于 0.0001 rad 的变化合并，终点不受此阈值影响。
+单独更新腕部时保持 AI 目标不变。通讯忙、被替代或短暂 ACK 超时时保留最新目标重试，
+避免最后一条目标丢失；原有通讯故障、使能及只读保护保留。
 
 ```bash
-# 推荐：STM32点到点电机使用稀疏执行
 ros2 launch double_arm_robot_moveit_config stm32_moveit.launch.py \
-  stm32_device:=/dev/ttyUSB0 execution_mode:=sparse
-
-# 仅作对比：原JointTrajectoryController连续插值路径
-ros2 launch double_arm_robot_moveit_config stm32_moveit.launch.py \
-  stm32_device:=/dev/ttyUSB0 execution_mode:=continuous
+  stm32_device:=/dev/ttyUSB0 execution_mode:=streaming controller_update_rate:=10
 ```
 
-稀疏参数位于
-`src/double_arm_sparse_execution/config/sparse_execution.yaml`。首轮建议保持默认值，
-实测后主要调整 `max_prismatic_step`、`wrist_update_period` 与到位容差。默认
-`allow_simultaneous_arms: false`，方向和零位确认阶段只允许一只臂执行；双臂同步
-执行器将在单臂验证完成后再接入。
+启动时继续传入你已标定的 `stm32_joint_directions` 和 `stm32_zero_offsets`。
+旧混合模式可用 `execution_mode:=sparse` 对比；原 JointTrajectoryController 路径为
+`execution_mode:=continuous`。不要同时启动多个控制入口。
 
-> 每个 J1～J3 稀疏段仍执行固件原有 `STOP → WRITE → TRIGGER` 流程；J4～J6
-> 在段内只更新 MW 最新目标。本改动不修改 F407 协议和电机状态机。
+参数位于 `src/double_arm_sparse_execution/config/sparse_execution.yaml`。
+先保持默认值，单臂小位移检查方向、终点和连续两次执行；再测试含腕部反转的轨迹。
+日志中的 `AI_changes` / `MW_changes` 是 ROS 发布的目标变化次数，不是实测电机执行频率。
+如仍明显卡顿，需要结合 F407 的总线发送和电机反馈日志判断，不能仅提高 ROS 频率。
+
+本次只改 ROS 工作区，**没有修改 F407 固件**。AI 每次更新仍可能执行
+`STOP → WRITE → TRIGGER`；因此不能保证消除固件造成的启停。
+协议只携带位置，不传速度、加速度和时间，实际运动不保证严格复现 MoveIt 时序或加速度。
+反馈确认针对新收到的 ROS 状态消息；现有协议没有逐轴采样时间戳。
+保留默认单臂执行限制。已完成离线逻辑测试，尚未完成 ROS Jazzy 集成或真机验证。
 
 ### F.3 STM32 方向与零位标定
 

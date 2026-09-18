@@ -3,8 +3,8 @@
 This is intentionally separate from e5_moveit.launch.py, which remains the
 verified direct-motor path.  Activation synchronises commands to feedback
 before enabling, therefore opening this launch never commands a zero pose.
-The default sparse mode uses hybrid execution: sparse J1-J3 AI-motor segment
-targets plus feedback-progress J4-J6 MW wrist updates.
+The default streaming mode advances intermediate targets continuously and
+confirms endpoint arrival. sparse preserves the earlier comparison mode.
 
 Use f2_stm32_readonly.launch.py first to determine the 12 direction signs and
 zero offsets.  This launch then starts the same MoveIt/controller topology as
@@ -36,6 +36,7 @@ def generate_launch_description():
         "stm32_target_ack_timeout_ms": ("200", None),
         "stm32_state_timeout_ms": ("200", None),
         "stm32_control_ack_timeout_ms": ("10000", None),
+        "controller_update_rate": ("10", ["5", "10", "20"]),
         "stm32_state_poll_hz": ("20.0", None),
         "stm32_state_stale_ms": ("1000", None),
         "stm32_activate_timeout_ms": ("10000", None),
@@ -46,7 +47,7 @@ def generate_launch_description():
         "start_rviz": ("true", ["true", "false"]),
         # sparse: hybrid J1-J3 sparse targets + J4-J6 progress streaming.
         # continuous: legacy JointTrajectoryController path for comparison.
-        "execution_mode": ("sparse", ["sparse", "continuous"]),
+        "execution_mode": ("streaming", ["streaming", "sparse", "continuous"]),
     }
     decls = []
     lcs = {}
@@ -94,6 +95,12 @@ def generate_launch_description():
     sparse_execution_file = PathJoinSubstitution(
         [FindPackageShare("double_arm_sparse_execution"),
          "config", "sparse_execution.yaml"])
+    forward_condition = IfCondition(PythonExpression([
+        "'", lcs["execution_mode"], "' != 'continuous'"
+    ]))
+    streaming_condition = IfCondition(PythonExpression([
+        "'", lcs["execution_mode"], "' == 'streaming'"
+    ]))
     sparse_condition = IfCondition(PythonExpression([
         "'", lcs["execution_mode"], "' == 'sparse'"
     ]))
@@ -116,7 +123,7 @@ def generate_launch_description():
         # timeout, not by the much shorter time stamps in MoveIt's plan.
         {"trajectory_execution.execution_duration_monitoring": ParameterValue(
             PythonExpression([
-                "'", lcs["execution_mode"], "' != 'sparse'"
+                "'", lcs["execution_mode"], "' == 'continuous'"
             ]),
             value_type=bool,
         )},
@@ -130,7 +137,8 @@ def generate_launch_description():
              output="screen", parameters=[robot_desc]),
         Node(package="controller_manager", executable="ros2_control_node",
              namespace="double_arm_robot", output="screen",
-             parameters=[continuous_controllers_file],
+             parameters=[continuous_controllers_file, {"update_rate": ParameterValue(
+                 lcs["controller_update_rate"], value_type=int)}],
              condition=continuous_condition,
              remappings=[
                  ("/double_arm_robot/robot_description", "/robot_description"),
@@ -138,8 +146,9 @@ def generate_launch_description():
              ]),
         Node(package="controller_manager", executable="ros2_control_node",
              namespace="double_arm_robot", output="screen",
-             parameters=[sparse_controllers_file],
-             condition=sparse_condition,
+             parameters=[sparse_controllers_file, {"update_rate": ParameterValue(
+                 lcs["controller_update_rate"], value_type=int)}],
+             condition=forward_condition,
              remappings=[
                  ("/double_arm_robot/robot_description", "/robot_description"),
                  ("/double_arm_robot/joint_states", "/joint_states"),
@@ -157,7 +166,7 @@ def generate_launch_description():
             package="controller_manager", executable="spawner", output="screen",
             arguments=[controller, "--controller-manager",
                        "/double_arm_robot/controller_manager"],
-            condition=sparse_condition,
+            condition=forward_condition,
         ))
     nodes.append(Node(
         package="controller_manager", executable="spawner", output="screen",
@@ -171,6 +180,14 @@ def generate_launch_description():
         output="screen",
         parameters=[sparse_execution_file],
         condition=sparse_condition,
+    ))
+    nodes.append(Node(
+        package="double_arm_sparse_execution",
+        executable="streaming_trajectory_executor",
+        name="streaming_trajectory_executor",
+        output="screen",
+        parameters=[sparse_execution_file],
+        condition=streaming_condition,
     ))
     nodes.append(Node(
         package="moveit_ros_move_group", executable="move_group", output="screen",

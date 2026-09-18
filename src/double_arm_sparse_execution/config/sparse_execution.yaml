@@ -32,3 +32,16 @@
 
     # Calibration mode: never execute both arms concurrently.
     allow_simultaneous_arms: false
+
+    # Streaming: one shared trajectory clock, separate target-update cadences.
+    stream_period: 0.05
+    ai_update_period: 0.10
+    mw_update_period: 0.10
+    ai_command_epsilon: 0.0002
+    mw_command_epsilon: 0.0001
+    tracking_prismatic_limit: 0.01
+    tracking_revolute_limit: 0.10
+    tracking_stall_timeout: 5.0
+    endpoint_stable_time: 0.3
+    endpoint_prismatic_stability: 0.0002
+    endpoint_revolute_stability: 0.002

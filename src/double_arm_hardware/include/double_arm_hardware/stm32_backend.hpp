@@ -529,7 +529,13 @@ inline bool Stm32Backend::run_control(uint8_t cmd)
   return true;
 }
 
-inline bool Stm32Backend::enable() { return run_control(Stm32Protocol::CMD_ENABLE); }
+inline bool Stm32Backend::enable()
+{
+  if (!run_control(Stm32Protocol::CMD_ENABLE)) return false;
+  std::lock_guard<std::mutex> lock(cache_mtx_);
+  arm_command_initialized_ = {false, false};
+  return true;
+}
 inline bool Stm32Backend::stop()   { return run_control(Stm32Protocol::CMD_STOP); }
 inline bool Stm32Backend::disable(){ return run_control(Stm32Protocol::CMD_DISABLE); }
 
@@ -768,6 +774,12 @@ inline bool Stm32Backend::send_arm_target(uint8_t arm)
 
   std::lock_guard<std::mutex> lock(cache_mtx_);
   record_target_result_locked(arm, res);
+  // Preserve the newest pending target across a lost ACK / busy response.
+  // Exact-duplicate suppression must never swallow the final target retry.
+  if (!escalated_ && (res < 0 || res == Stm32Protocol::ACK_CTRL_BUSY ||
+                     res == Stm32Protocol::ACK_SUPERSEDED)) {
+    arm_dirty_[arm] = true;
+  }
   return res == Stm32Protocol::ACK_OK || res == Stm32Protocol::ACK_SUPERSEDED;
 }
 

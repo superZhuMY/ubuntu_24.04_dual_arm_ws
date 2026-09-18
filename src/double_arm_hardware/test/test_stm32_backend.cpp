@@ -882,3 +882,24 @@ TEST(Stm32BackendLifecycle, CloseStopsThreadAndIsIdempotent)
   f.be->close();  // idempotent
   SUCCEED();
 }
+
+TEST(Stm32BackendTarget, RetriesLatestTargetAfterBusy)
+{
+  BF f;
+  f.connect_ok();
+  f.full_valid({});
+  ASSERT_TRUE(f.be->wait_all_valid(2000));
+  f.open_gate();
+  std::array<double, 12> target{};
+  target[0] = 0.01;
+  f.mock->set_ack_result_for(Stm32Protocol::CMD_TARGET, Stm32Protocol::ACK_CTRL_BUSY);
+  ASSERT_TRUE(f.be->write_targets(target));
+  f.be->service_step();
+  const auto before = collect_targets(f.mock->sent_frames()).size();
+  f.mock->set_ack_result_for(Stm32Protocol::CMD_TARGET, Stm32Protocol::ACK_OK);
+  f.be->service_step();
+  EXPECT_GT(collect_targets(f.mock->sent_frames()).size(), before);
+  const auto after = collect_targets(f.mock->sent_frames()).size();
+  f.be->service_step();
+  EXPECT_EQ(collect_targets(f.mock->sent_frames()).size(), after);
+}
