@@ -6,7 +6,7 @@
 
 /double_arm_robot/controller_manager:
   ros__parameters:
-    update_rate: 5
+    update_rate: 10  # launch controller_update_rate can override (5/10/20 Hz)
 
     l_arm_position:
       type: forward_command_controller/ForwardCommandController

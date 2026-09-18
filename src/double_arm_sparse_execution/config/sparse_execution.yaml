@@ -1,14 +1,15 @@
 /**:
   ros__parameters:
     # J1-J3 sparse stops. 30 mm reduces AI stop/write/trigger cycles.
-    # Safety checks may still retain additional points.
+    # Wrist turns and posture changes may retain additional points.
     max_prismatic_step: 0.03
     max_revolute_step: 0.05
     prismatic_chord_error: 0.002
     revolute_chord_error: 0.02
     direction_change_degrees: 15.0
 
-    # Advance only after real feedback remains inside tolerance.
+    # Advance after distinct received joint-state messages are inside tolerance.
+    # This is message freshness, not a per-motor hardware sample timestamp.
     prismatic_tolerance: 0.002
     revolute_tolerance: 0.02
     stable_samples: 2

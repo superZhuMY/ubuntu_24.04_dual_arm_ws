@@ -36,6 +36,7 @@ def generate_launch_description():
         "stm32_target_ack_timeout_ms": ("200", None),
         "stm32_state_timeout_ms": ("200", None),
         "stm32_control_ack_timeout_ms": ("10000", None),
+        "controller_update_rate": ("10", ["5", "10", "20"]),
         "stm32_state_poll_hz": ("20.0", None),
         "stm32_state_stale_ms": ("1000", None),
         "stm32_activate_timeout_ms": ("10000", None),
@@ -130,7 +131,9 @@ def generate_launch_description():
              output="screen", parameters=[robot_desc]),
         Node(package="controller_manager", executable="ros2_control_node",
              namespace="double_arm_robot", output="screen",
-             parameters=[continuous_controllers_file],
+             parameters=[continuous_controllers_file, {
+                 "update_rate": ParameterValue(lcs["controller_update_rate"], value_type=int),
+             }],
              condition=continuous_condition,
              remappings=[
                  ("/double_arm_robot/robot_description", "/robot_description"),
@@ -138,7 +141,9 @@ def generate_launch_description():
              ]),
         Node(package="controller_manager", executable="ros2_control_node",
              namespace="double_arm_robot", output="screen",
-             parameters=[sparse_controllers_file],
+             parameters=[sparse_controllers_file, {
+                 "update_rate": ParameterValue(lcs["controller_update_rate"], value_type=int),
+             }],
              condition=sparse_condition,
              remappings=[
                  ("/double_arm_robot/robot_description", "/robot_description"),

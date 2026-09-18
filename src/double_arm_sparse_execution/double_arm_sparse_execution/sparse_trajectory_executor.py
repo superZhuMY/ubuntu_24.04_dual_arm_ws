@@ -29,7 +29,7 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64MultiArray
 from trajectory_msgs.msg import JointTrajectoryPoint
 
-from .sparse_filter import hybrid_target, select_sparse_indices
+from .sparse_filter import FreshFeedbackCounter, hybrid_target, select_sparse_indices
 
 
 @dataclass(frozen=True)
@@ -100,6 +100,7 @@ class SparseTrajectoryExecutor(Node):
         self._state_lock = threading.Lock()
         self._positions: dict[str, float] = {}
         self._last_state_time = 0.0
+        self._state_sequence = 0
         self._busy_lock = threading.Lock()
         self._busy = {LEFT.name: False, RIGHT.name: False}
 
@@ -169,6 +170,7 @@ class SparseTrajectoryExecutor(Node):
         with self._state_lock:
             self._positions.update(dict(zip(message.name, message.position)))
             self._last_state_time = time.monotonic()
+            self._state_sequence += 1
 
     def _current_positions(self, spec: ArmSpec) -> Optional[list[float]]:
         with self._state_lock:
@@ -226,32 +228,16 @@ class SparseTrajectoryExecutor(Node):
         result = FollowJointTrajectory.Result()
         try:
             points = self._ordered_points(spec, goal_handle)
-            # In hybrid mode only J1-J3 determine sparse stops.  J4-J6 are
-            # streamed between those stops and therefore must not create
-            # additional AI-motor stop/write/trigger cycles.
-            filter_points = (
-                [point[:3] for point in points]
-                if self._hybrid_wrist_streaming
-                else points
-            )
-            filter_chords = (
-                [self._prismatic_chord_error] * 3
-                if self._hybrid_wrist_streaming
-                else self._axis_values(
-                    self._prismatic_chord_error, self._revolute_chord_error
-                )
-            )
-            filter_steps = (
-                [self._max_prismatic_step] * 3
-                if self._hybrid_wrist_streaming
-                else self._axis_values(
-                    self._max_prismatic_step, self._max_revolute_step
-                )
-            )
+            # Preserve wrist turns and posture excursions as well as XYZ shape.
+            # Both motor families must follow the retained six-axis path.
             indices = select_sparse_indices(
-                filter_points,
-                chord_tolerances=filter_chords,
-                max_steps=filter_steps,
+                points,
+                chord_tolerances=self._axis_values(
+                    self._prismatic_chord_error, self._revolute_chord_error
+                ),
+                max_steps=self._axis_values(
+                    self._max_prismatic_step, self._max_revolute_step
+                ),
                 direction_change_degrees=self._direction_change,
             )
             checked = await self._protect_collision_segments(spec, points, indices)
@@ -418,7 +404,10 @@ class SparseTrajectoryExecutor(Node):
             return "joint feedback is missing or stale before waypoint command"
 
         if self._hybrid_wrist_streaming:
-            command, progress = hybrid_target(segment_start, target, segment_start)
+            command, progress = hybrid_target(
+                segment_start, target, segment_start,
+                prismatic_tolerance=self._prismatic_tolerance,
+            )
         else:
             command, progress = list(target), 1.0
 
@@ -433,7 +422,8 @@ class SparseTrajectoryExecutor(Node):
         )
 
         start = time.monotonic()
-        stable = 0
+        with self._state_lock:
+            counter = FreshFeedbackCounter(self._state_sequence)
         tolerances = self._axis_values(
             self._prismatic_tolerance, self._revolute_tolerance
         )
@@ -441,14 +431,18 @@ class SparseTrajectoryExecutor(Node):
         while time.monotonic() - start <= self._waypoint_timeout:
             if goal_handle.is_cancel_requested:
                 return "trajectory canceled"
-            actual = self._current_positions(spec)
-            if actual is None or not self._state_is_fresh():
+            with self._state_lock:
+                actual = [self._positions[joint] for joint in spec.joints]
+                state_sequence = self._state_sequence
+            if not self._state_is_fresh():
                 return "joint feedback became stale while moving"
 
             now = time.monotonic()
             if self._hybrid_wrist_streaming:
                 next_command, progress = hybrid_target(
-                    segment_start, target, actual
+                    segment_start, target, actual,
+                    prismatic_tolerance=self._prismatic_tolerance,
+                    previous_progress=progress,
                 )
                 wrist_changed = any(
                     abs(new - old) >= self._wrist_command_epsilon
@@ -457,7 +451,7 @@ class SparseTrajectoryExecutor(Node):
                 final_wrist_needed = (
                     progress >= 1.0
                     and any(
-                        abs(desired - sent) >= self._wrist_command_epsilon
+                        desired != sent
                         for desired, sent in zip(target[3:], last_command[3:])
                     )
                 )
@@ -475,12 +469,18 @@ class SparseTrajectoryExecutor(Node):
                     )
                     last_command = next_command
                     last_wrist_update = now
+                    if final_wrist_needed:
+                        # Require feedback received after the final command.
+                        with self._state_lock:
+                            counter = FreshFeedbackCounter(self._state_sequence)
 
             errors = [desired - measured for desired, measured in zip(target, actual)]
-            stable = (
-                stable + 1
-                if all(abs(error) <= limit for error, limit in zip(errors, tolerances))
-                else 0
+            final_sent = last_command == list(target)
+            stable = counter.observe(
+                state_sequence,
+                final_sent and all(
+                    abs(error) <= limit for error, limit in zip(errors, tolerances)
+                ),
             )
             self._publish_feedback(spec, goal_handle, last_command, actual, errors)
             if stable >= self._stable_samples:

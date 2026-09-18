@@ -92,5 +92,46 @@ class SparseFilterTest(unittest.TestCase):
             hybrid_target([0.0] * 5, [0.0] * 6, [0.0] * 6)
 
 
+
+
+class HybridRegressionTests(unittest.TestCase):
+    def test_tiny_axis_does_not_block_wrist(self):
+        cmd, p = hybrid_target([0.0]*6, [0.03, 0.0001, 0, 1, 0, 0],
+                               [0.015, 0, 0, 0, 0, 0])
+        self.assertAlmostEqual(p, 0.5)
+        self.assertAlmostEqual(cmd[3], 0.5)
+
+    def test_tolerance_finishes_wrist_in_both_directions(self):
+        for sign in (1, -1):
+            target = [sign*0.03, 0, 0, 0.7, 0, 0]
+            cmd, p = hybrid_target([0.0]*6, target, [sign*0.029, 0, 0, 0, 0, 0])
+            self.assertEqual(p, 1.0)
+            self.assertEqual(cmd, target)
+
+    def test_progress_never_reverses_with_feedback_noise(self):
+        cmd, p = hybrid_target([0.0]*6, [0.03, 0, 0, 1, 0, 0],
+                               [0.012, 0, 0, 0, 0, 0], previous_progress=0.5)
+        self.assertEqual(p, 0.5)
+        self.assertEqual(cmd[3], 0.5)
+
+    def test_wrist_excursion_is_not_erased(self):
+        points = [[0, 0, 0, a, 0, 0] for a in [0, 0.025, 0.05, 0.025, 0]]
+        indices = select_sparse_indices(points, [0.002]*3+[0.02]*3,
+                                         [0.03]*3+[0.05]*3, 15.0)
+        self.assertIn(2, indices)
+        self.assertEqual(indices[0], 0)
+        self.assertEqual(indices[-1], 4)
+
+    def test_same_feedback_cannot_complete_stability(self):
+        from double_arm_sparse_execution.sparse_filter import FreshFeedbackCounter
+        counter = FreshFeedbackCounter(10)
+        self.assertEqual(counter.observe(10, True), 0)
+        self.assertEqual(counter.observe(11, True), 1)
+        self.assertEqual(counter.observe(11, True), 1)
+        self.assertEqual(counter.observe(12, False), 0)
+        self.assertEqual(counter.observe(13, True), 1)
+        self.assertEqual(counter.observe(14, True), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
