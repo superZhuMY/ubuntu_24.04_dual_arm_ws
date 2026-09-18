@@ -151,8 +151,6 @@ def hybrid_target(
     target: Sequence[float],
     actual: Sequence[float],
     motion_epsilon: float = 1.0e-9,
-    prismatic_tolerance: float = 0.002,
-    previous_progress: float = 0.0,
 ) -> tuple[list[float], float]:
     """Build a six-axis hybrid command and return prismatic progress.
 
@@ -172,43 +170,17 @@ def hybrid_target(
     ):
         raise ValueError("hybrid target contains a non-finite position")
 
-    if not math.isfinite(prismatic_tolerance) or prismatic_tolerance <= 0.0:
-        raise ValueError("prismatic tolerance must be finite and positive")
-    if not math.isfinite(previous_progress) or not 0.0 <= previous_progress <= 1.0:
-        raise ValueError("previous progress must be within [0, 1]")
-
     fractions = []
     for begin, end, measured in zip(start[:3], target[:3], actual[:3]):
         distance = end - begin
-        if abs(distance) <= max(motion_epsilon, prismatic_tolerance):
+        if abs(distance) <= motion_epsilon:
             continue
-        fractions.append(
-            1.0 if abs(end - measured) <= prismatic_tolerance
-            else (measured - begin) / distance
-        )
+        fractions.append((measured - begin) / distance)
 
     # A wrist-only segment does not need artificial intermediate targets.
     progress = 1.0 if not fractions else max(0.0, min(1.0, min(fractions)))
-    progress = max(previous_progress, progress)
-    if progress >= 1.0:
-        return list(target), 1.0
     command = list(target[:3]) + [
         begin + progress * (end - begin)
         for begin, end in zip(start[3:], target[3:])
     ]
     return command, progress
-
-
-
-class FreshFeedbackCounter:
-    """Count consecutive in-tolerance observations, once per received message."""
-
-    def __init__(self, sequence: int = 0):
-        self.sequence = sequence
-        self.count = 0
-
-    def observe(self, sequence: int, inside: bool) -> int:
-        if sequence > self.sequence:
-            self.sequence = sequence
-            self.count = self.count + 1 if inside else 0
-        return self.count
