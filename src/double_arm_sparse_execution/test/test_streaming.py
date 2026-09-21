@@ -1,48 +1,91 @@
+"""Key-segment extraction and endpoint gate tests."""
 import unittest
-from double_arm_sparse_execution.streaming import TimedPath, TargetPacer, EndpointGate
+
+from double_arm_sparse_execution.streaming import (
+    EndpointGate, extract_key_segments, validate_trajectory)
 
 
 def point(x=0.0, wrist=0.0):
     return [x, 0, 0, wrist, 0, 0]
 
 
-class StreamingHelpersTest(unittest.TestCase):
-    def test_original_timestamps_control_interpolation(self):
-        path = TimedPath([0, 2, 3], [point(), point(.02), point(.03)])
-        self.assertAlmostEqual(path.sample(1)[0], .01)
-        self.assertEqual(path.sample(9), point(.03))
+def targets_for(points, **kwargs):
+    times = [0.05*i for i in range(len(points))]
+    return [points[i] for i in extract_key_segments(times, points, **kwargs)]
 
-    def test_wrist_reversal_cannot_be_skipped(self):
-        path = TimedPath([0, .1, .2], [point(), point(wrist=.1), point()])
-        t, forced = path.advance(0, 1)
-        self.assertEqual(t, .1)
-        self.assertTrue(forced)
-        self.assertEqual(path.sample(t), point(wrist=.1))
+
+class ValidationTest(unittest.TestCase):
+    def test_rejects_malformed_trajectories(self):
+        good = [point(), point(.01)]
+        for times, points in (
+            ([], []),
+            ([0, 0], good),
+            ([1, 0], good),
+            ([0, float('nan')], good),
+            ([0, -1.0], good),
+            ([0, 1], [point(), [.01]*5]),
+            ([0, 1], [point(), [.01, 0, 0, 0, 0, float('nan')]]),
+        ):
+            with self.assertRaises(ValueError):
+                validate_trajectory(times, points)
+
+    def test_accepts_single_point_trajectory(self):
+        validate_trajectory([0.0], [point(.01)])
+        self.assertEqual(extract_key_segments([0.0], [point(.01)]), [0])
+
+
+class KeySegmentTest(unittest.TestCase):
+    def test_monotonic_path_keeps_only_final_point(self):
+        points = [point(0), point(.01), point(.02), point(.03)]
+        self.assertEqual(targets_for(points), [point(.03)])
+
+    def test_dense_interpolation_does_not_add_segments(self):
+        coarse = [point(0), point(.02), point(.04)]
+        dense = [point(.04*i/49) for i in range(50)]
+        self.assertEqual(targets_for(dense), targets_for(coarse))
+
+    def test_axis_reversal_keeps_the_extremum(self):
+        points = [point(0), point(.01), point(.02), point(.01), point(0)]
+        self.assertEqual(targets_for(points), [point(.02), point(0)])
 
     def test_reversal_with_plateau(self):
-        path = TimedPath([0,1,2,3], [point(),point(.01),point(.01),point()])
-        self.assertEqual(path.advance(0,3), (2,True))
+        points = [point(), point(.01), point(.01), point()]
+        self.assertEqual(targets_for(points), [point(.01), point()])
 
-    def test_bad_timestamps_rejected(self):
-        for times in ([0,0], [1,0], [0,float('nan')]):
-            with self.assertRaises(ValueError):
-                TimedPath(times, [point(),point(.01)])
+    def test_small_noise_does_not_create_segments(self):
+        points = [point(0), point(.0001), point(-.0001), point(.0001), point(.02)]
+        self.assertEqual(targets_for(points), [point(.02)])
 
-    def test_wrist_update_holds_ai_exactly(self):
-        p = TargetPacer(point(), .2, .05, .0002, .0001)
-        p.update(point(), 0, True)
-        cmd = p.update(point(.005, .02), .06)
-        self.assertEqual(cmd[:3], point()[:3])
-        self.assertEqual(cmd[3], .02)
-        self.assertIsNone(p.update(point(.006,.02), .1))
-        self.assertEqual(p.update(point(.007,.03), .21), point(.007,.03))
+    def test_xyz_corner_keeps_the_corner_point(self):
+        points = [[0, 0, 0, 0, 0, 0], [.02, 0, 0, 0, 0, 0], [.02, .02, 0, 0, 0, 0]]
+        self.assertEqual(targets_for(points), [[.02, 0, 0, 0, 0, 0], [.02, .02, 0, 0, 0, 0]])
 
-    def test_final_bypasses_small_change_threshold(self):
-        p = TargetPacer(point(), .1, .1, .001, .01)
-        p.update(point(), 0, True)
-        self.assertIsNone(p.update(point(.0001,.001), .05, True))
-        self.assertEqual(p.update(point(.0001,.001), .11, True), point(.0001,.001))
+    def test_gentle_bend_is_not_a_key_point(self):
+        import math
+        angle = math.radians(10)
+        points = [
+            [0, 0, 0, 0, 0, 0],
+            [.02, 0, 0, 0, 0, 0],
+            [.02+.02*math.cos(angle), .02*math.sin(angle), 0, 0, 0, 0],
+        ]
+        self.assertEqual(targets_for(points), [points[-1]])
 
+    def test_wrist_reversal_keeps_its_extremum(self):
+        points = [point(wrist=0), point(wrist=.1), point(wrist=.2), point(wrist=.1)]
+        self.assertEqual(targets_for(points), [point(wrist=.2), point(wrist=.1)])
+
+    def test_wrist_only_monotonic_motion_creates_single_segment(self):
+        points = [point(wrist=0), point(wrist=.05), point(wrist=.1)]
+        self.assertEqual(targets_for(points), [point(wrist=.1)])
+
+    def test_corner_angle_parameter_is_respected(self):
+        points = [[0, 0, 0, 0, 0, 0], [.02, 0, 0, 0, 0, 0], [.02, .02, 0, 0, 0, 0]]
+        self.assertEqual(targets_for(points, corner_angle_deg=30.0),
+                         [[.02, 0, 0, 0, 0, 0], [.02, .02, 0, 0, 0, 0]])
+        self.assertEqual(targets_for(points, corner_angle_deg=100.0), [points[-1]])
+
+
+class EndpointGateTest(unittest.TestCase):
     def test_endpoint_needs_new_and_settled_feedback(self):
         gate = EndpointGate(1, [.002]*3+[.02]*3, [.0002]*3+[.002]*3, .3)
         self.assertFalse(gate.observe(1,0,point(),point()))

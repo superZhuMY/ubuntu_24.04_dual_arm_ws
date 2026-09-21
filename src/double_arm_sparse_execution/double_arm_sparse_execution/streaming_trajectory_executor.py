@@ -1,4 +1,4 @@
-"""Continuous intermediate targets, feedback-confirmed endpoint completion."""
+"""One complete six-axis target per key segment, feedback-confirmed completion."""
 import math
 import time
 
@@ -9,32 +9,35 @@ from rclpy.executors import MultiThreadedExecutor
 from std_msgs.msg import Float64MultiArray
 
 from .sparse_trajectory_executor import SparseTrajectoryExecutor, LEFT, RIGHT
-from .streaming import TimedPath, TargetPacer, EndpointGate
+from .streaming import EndpointGate, extract_key_segments, validate_trajectory
+
+
+class _Cancelled(Exception):
+    """Raised internally when the goal is canceled during a wait."""
 
 
 class StreamingTrajectoryExecutor(SparseTrajectoryExecutor):
     def __init__(self):
         super().__init__()
         self._stream_states = {}
-        self._period = float(self._param("stream_period", 0.05))
-        self._ai_period = float(self._param("ai_update_period", 0.10))
-        self._mw_period = float(self._param("mw_update_period", 0.10))
-        self._ai_epsilon = float(self._param("ai_command_epsilon", 0.0002))
-        self._mw_epsilon = float(self._param("mw_command_epsilon", 0.0001))
-        lead_p = float(self._param("tracking_prismatic_limit", 0.01))
-        lead_r = float(self._param("tracking_revolute_limit", 0.10))
-        self._stall_timeout = float(self._param("tracking_stall_timeout", 5.0))
+        self._corner_angle = float(self._param("ai_corner_angle_deg", 15.0))
+        self._position_epsilon = float(self._param("ai_position_epsilon", 0.0002))
+        self._stall_timeout = float(self._param("motion_stall_timeout", 5.0))
+        self._progress_epsilon = float(self._param("motion_progress_epsilon", 0.0002))
         self._settle_time = float(self._param("endpoint_stable_time", 0.3))
         stable_p = float(self._param("endpoint_prismatic_stability", 0.0002))
         stable_r = float(self._param("endpoint_revolute_stability", 0.002))
-        for value in (self._period,self._ai_period,self._mw_period,self._ai_epsilon,
-                      self._mw_epsilon,lead_p,lead_r,self._stall_timeout,
-                      self._settle_time,stable_p,stable_r):
+        for value in (self._position_epsilon, self._stall_timeout,
+                      self._progress_epsilon, self._settle_time,
+                      stable_p, stable_r):
             if not math.isfinite(value) or value <= 0:
-                raise ValueError("streaming periods and tolerances must be finite and positive")
-        self._lead = [lead_p]*3+[lead_r]*3
+                raise ValueError("streaming tolerances must be finite and positive")
+        if not math.isfinite(self._corner_angle) or not 0.0 <= self._corner_angle <= 180.0:
+            raise ValueError("ai_corner_angle_deg must be within [0, 180]")
         self._stability = [stable_p]*3+[stable_r]*3
-        self.get_logger().info("STREAMING: intermediate points do not wait for arrival; endpoint waits for feedback")
+        self.get_logger().info(
+            "STREAMING: one six-axis target per key segment; key points and the "
+            "endpoint wait for real arrival feedback")
 
     def _joint_state_callback(self, message):
         super()._joint_state_callback(message)
@@ -58,7 +61,7 @@ class StreamingTrajectoryExecutor(SparseTrajectoryExecutor):
         try:
             times = [p.time_from_start.sec+p.time_from_start.nanosec*1e-9
                      for p in request.trajectory.points]
-            TimedPath(times, [list(p.positions) for p in request.trajectory.points])
+            validate_trajectory(times, [list(p.positions) for p in request.trajectory.points])
         except ValueError as error:
             self.get_logger().error(str(error))
             return GoalResponse.REJECT
@@ -67,97 +70,118 @@ class StreamingTrajectoryExecutor(SparseTrajectoryExecutor):
     async def _execute(self, spec, goal_handle):
         result = FollowJointTrajectory.Result()
         try:
-            # Respect a scheduled start without advancing virtual trajectory time.
+            # Respect a scheduled start without emitting any target first.
             stamp = goal_handle.request.trajectory.header.stamp
             scheduled = stamp.sec+stamp.nanosec*1e-9
             while scheduled > self.get_clock().now().nanoseconds*1e-9:
                 self._snapshot(spec)
                 if goal_handle.is_cancel_requested:
                     return self._cancel_stream(spec, goal_handle, result)
-                await self._sleep(self._period)
-            actual, seq, _ = self._snapshot(spec)
+                await self._sleep(self._feedback_period)
+            actual, _, _ = self._snapshot(spec)
             points = self._ordered_points(spec, goal_handle)
             times = [p.time_from_start.sec+p.time_from_start.nanosec*1e-9
                      for p in goal_handle.request.trajectory.points]
             if times[0] > 0:
                 times.insert(0, 0.0)
                 points.insert(0, actual.copy())
-            elif any(abs(a-b)>limit for a,b,limit in zip(actual,points[0],self._lead)):
+            elif any(abs(a-b) > limit for a, b, limit in zip(
+                    actual, points[0],
+                    self._axis_values(self._prismatic_tolerance,
+                                      self._revolute_tolerance))):
                 raise RuntimeError("trajectory start differs from current feedback; replan from current state")
-            path = TimedPath(times, points)
-            pacer = TargetPacer(actual,self._ai_period,self._mw_period,
-                                self._ai_epsilon,self._mw_epsilon)
-            tolerance = self._axis_values(self._prismatic_tolerance,self._revolute_tolerance)
-            virtual = 0.0
-            last_tick = time.monotonic()
-            paused_since = None
-            endpoint_since = None
-            endpoint_gate = None
-            last_log = last_tick
-            prior_counts = [0,0]
-            force_start = True
-            self.get_logger().info(f"{spec.name}: streaming {len(points)} points, planned duration={path.end:.3f}s")
-            while True:
-                now = time.monotonic()
-                dt = min(self._period, max(0.0, now-last_tick))
-                last_tick = now
+            indices = extract_key_segments(times, points,
+                                           self._corner_angle, self._position_epsilon)
+            targets = [points[i] for i in indices]
+            self.get_logger().info(
+                f"{spec.group}: plan points={len(points)} -> AI segments={len(targets)}")
+            for number, target in enumerate(targets, start=1):
                 if goal_handle.is_cancel_requested:
                     return self._cancel_stream(spec, goal_handle, result)
-                actual, seq, _ = self._snapshot(spec)
-                if endpoint_gate is None:
-                    reference = path.sample(virtual)
-                    paused = any(abs(a-b)>limit for a,b,limit in zip(reference,actual,self._lead))
-                    if paused:
-                        if paused_since is None:
-                            paused_since = now
-                        if now-paused_since > self._stall_timeout:
-                            raise RuntimeError("tracking error remained too large; trajectory progress paused then timed out")
-                        proposed, protected = virtual, False
-                    else:
-                        paused_since = None
-                        proposed, protected = path.advance(virtual,dt)
-                    force = force_start or protected
-                    if not force or pacer.ready(now):
-                        virtual = proposed
-                        desired = path.sample(virtual)
-                        command = pacer.update(desired, now, force=force)
-                        if command is not None:
-                            self._publishers[spec.name].publish(Float64MultiArray(data=command))
-                            force_start = False
-                            if virtual >= path.end:
-                                # Finish only using messages received after the final publish.
-                                _, sent_seq, _ = self._snapshot(spec)
-                                endpoint_gate = EndpointGate(sent_seq,tolerance,self._stability,self._settle_time)
-                                endpoint_since = now
-                                self.get_logger().info(f"{spec.name}: exact endpoint published; waiting for settled feedback")
-                else:
-                    paused = False
-                    if endpoint_gate.observe(seq,now,points[-1],actual):
-                        goal_handle.succeed()
-                        self.get_logger().info(f"{spec.name}: endpoint confirmed from fresh feedback")
-                        return self._set_result(result,FollowJointTrajectory.Result.SUCCESSFUL,"endpoint reached and settled")
-                    if now-endpoint_since > self._waypoint_timeout:
-                        raise RuntimeError("endpoint did not settle before timeout")
-                errors = [a-b for a,b in zip(pacer.last,actual)]
-                self._publish_feedback(spec,goal_handle,pacer.last,actual,errors)
-                if now-last_log >= 1.0:
-                    elapsed = now-last_log
-                    rates = [(a-b)/elapsed for a,b in zip(pacer.counts,prior_counts)]
+                self._publishers[spec.name].publish(Float64MultiArray(data=list(target)))
+                self.get_logger().info(
+                    f"{spec.group}: AI segment target {number}/{len(targets)} published")
+                final = number == len(targets)
+                gate = None
+                if final:
+                    # Finish only using messages received after the final publish.
+                    _, sent_seq, _ = self._snapshot(spec)
+                    gate = EndpointGate(
+                        sent_seq,
+                        self._axis_values(self._prismatic_tolerance,
+                                          self._revolute_tolerance),
+                        self._stability, self._settle_time)
+                await self._wait_for_arrival(spec, goal_handle, target, gate)
+                if final:
+                    goal_handle.succeed()
                     self.get_logger().info(
-                        f"{spec.name}: t={virtual:.2f}/{path.end:.2f}s "
-                        f"AI_changes={rates[0]:.1f}/s MW_changes={rates[1]:.1f}/s "
-                        f"error={max(map(abs,errors[:3])):.4f}m/{max(map(abs,errors[3:])):.4f}rad "
-                        f"paused={paused}")
-                    last_log, prior_counts = now, pacer.counts.copy()
-                await self._sleep(self._period)
+                        f"{spec.group}: endpoint confirmed from fresh stable feedback; "
+                        f"AI target changes={len(targets)}")
+                    return self._set_result(
+                        result, FollowJointTrajectory.Result.SUCCESSFUL,
+                        "endpoint reached and settled")
+        except _Cancelled:
+            return self._cancel_stream(spec, goal_handle, result)
         except Exception as error:
             self.get_logger().error(f"{spec.name}: {error}")
             self._hold_current(spec)
             goal_handle.abort()
-            return self._set_result(result,FollowJointTrajectory.Result.GOAL_TOLERANCE_VIOLATED,str(error))
+            return self._set_result(
+                result, FollowJointTrajectory.Result.GOAL_TOLERANCE_VIOLATED, str(error))
         finally:
             with self._busy_lock:
                 self._busy[spec.name] = False
+
+    async def _wait_for_arrival(self, spec, goal_handle, target, gate):
+        """Wait until the segment target is reached.
+
+        Intermediate segments need all six axes inside tolerance; the final
+        segment additionally has to settle on fresh feedback in EndpointGate.
+        Raises on cancel, motor stall and timeout.
+        """
+        tolerance = self._axis_values(self._prismatic_tolerance,
+                                      self._revolute_tolerance)
+        actual, _, _ = self._snapshot(spec)
+        reference, reference_since = actual, time.monotonic()
+        started = reference_since
+        last_log = reference_since
+        stable = 0
+        while True:
+            now = time.monotonic()
+            if goal_handle.is_cancel_requested:
+                raise _Cancelled()
+            actual, seq, _ = self._snapshot(spec)
+            errors = [t-a for t, a in zip(target, actual)]
+            arrived = all(abs(e) <= tol for e, tol in zip(errors, tolerance))
+            if gate is not None:
+                if gate.observe(seq, now, target, actual):
+                    return
+            elif arrived:
+                stable += 1
+                if stable >= self._stable_samples:
+                    return
+            else:
+                stable = 0
+            if not arrived:
+                moved = max(abs(a-b) for a, b in zip(actual, reference))
+                if moved > self._progress_epsilon:
+                    reference, reference_since = actual, now
+                elif now-reference_since > self._stall_timeout:
+                    raise RuntimeError(
+                        "motor motion stalled; no axis progressed toward the segment target")
+            if now-started > self._waypoint_timeout:
+                if gate is None:
+                    raise RuntimeError(
+                        "segment target was not reached before timeout")
+                raise RuntimeError("endpoint did not settle before timeout")
+            self._publish_feedback(spec, goal_handle, target, actual, errors)
+            if now-last_log >= 1.0:
+                self.get_logger().info(
+                    f"{spec.name}: waiting for arrival, error="
+                    f"{max(map(abs,errors[:3])):.4f}m/{max(map(abs,errors[3:])):.4f}rad "
+                    f"arrived={arrived}")
+                last_log = now
+            await self._sleep(self._feedback_period)
 
     def _cancel_stream(self, spec, goal_handle, result):
         self._hold_current(spec)

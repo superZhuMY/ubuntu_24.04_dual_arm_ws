@@ -11,7 +11,7 @@
 ```
 src/
   double_arm_hardware/            核心包：硬件插件 + 协议 + 传输层 + readonly_check
-  double_arm_sparse_execution/    STM32 连续目标执行 + 终点反馈确认（保留旧稀疏模式）
+  double_arm_sparse_execution/    STM32 关键段执行 + 终点反馈确认（保留旧稀疏模式）
   double_arm_robot/               URDF/xacro、mesh、显示 launch
   double_arm_robot_moveit_config/ SRDF、kinematics、控制器 YAML、全部 launch
   double_arm_jaka_interfaces/     自定义 msg/srv/action
@@ -90,17 +90,26 @@ ros2 launch double_arm_robot_moveit_config stm32_moveit.launch.py \
   stm32_zero_offsets:=0,0,0,0,0,0,0,0,0,0,0,0
 ```
 
-### STM32 连续目标执行（本分支待上机验证）
+### STM32 关键段执行（本分支待上机验证）
 
 `stm32_moveit.launch.py` 默认 `execution_mode:=streaming`：保留 MoveIt 规划和
-FollowJointTrajectory 接口，中间目标按原始时间轴做位置线性采样，不再逐段等待到位。
-转向点、明显拐角和精确终点强制发送；只在终点等待新的反馈持续稳定 0.3 秒后返回成功。
-跟随误差过大时暂停轨迹时间，持续跟不上则中止，避免下一阶段在上一阶段未完成时开始。
+FollowJointTrajectory 接口，执行原理为：
 
-默认控制器 10 Hz；执行器检查周期 50 ms，AI/MW 目标更新间隔分别为 100 ms。
-AI 小于 0.2 mm、MW 小于 0.0001 rad 的变化合并，终点不受此阈值影响。
-单独更新腕部时保持 AI 目标不变。通讯忙、被替代或短暂 ACK 超时时保留最新目标重试，
-避免最后一条目标丢失；原有通讯故障、使能及只读保护保留。
+```text
+MoveIt完整轨迹
+  → 提取关键运动段（任意关节方向反转点 + XYZ合成拐点(>15°) + 最终点）
+  → 每段只发送一次完整六轴目标（不再按 time_from_start 插值中间目标）
+  → 中间关键段等待六轴全部进入到位容差后才发下一段
+  → 终点等待新反馈在容差内持续稳定 0.3 秒
+  → 返回 FollowJointTrajectory 成功
+```
+
+普通单调点到点轨迹只产生 1 个段目标，底层只启动一次；密集 MoveIt 插值点
+不产生任何额外目标。关键点处允许产生一次必要停顿（现有电机接口无法无停顿
+改变方向）。卡滞检测：目标未到位且 `motion_stall_timeout` 内六轴位置均无
+超过 `motion_progress_epsilon` 的变化时中止 Action，报告电机运动卡滞。
+
+启动命令不变：
 
 ```bash
 ros2 launch double_arm_robot_moveit_config stm32_moveit.launch.py \
@@ -111,16 +120,28 @@ ros2 launch double_arm_robot_moveit_config stm32_moveit.launch.py \
 旧混合模式可用 `execution_mode:=sparse` 对比；原 JointTrajectoryController 路径为
 `execution_mode:=continuous`。不要同时启动多个控制入口。
 
-参数位于 `src/double_arm_sparse_execution/config/sparse_execution.yaml`。
-先保持默认值，单臂小位移检查方向、终点和连续两次执行；再测试含腕部反转的轨迹。
-日志中的 `AI_changes` / `MW_changes` 是 ROS 发布的目标变化次数，不是实测电机执行频率。
-如仍明显卡顿，需要结合 F407 的总线发送和电机反馈日志判断，不能仅提高 ROS 频率。
+参数位于 `src/double_arm_sparse_execution/config/sparse_execution.yaml`
+（streaming 块：`ai_corner_angle_deg`、`ai_position_epsilon`、
+`endpoint_stable_time`、`endpoint_prismatic_stability`、
+`endpoint_revolute_stability`、`motion_stall_timeout`、
+`motion_progress_epsilon`；到位容差与超时复用公共块）。
+先保持默认值，按顺序做真机验收：单臂单轴小位移 → J1～J3 联合单调运动 →
+同一目标连续执行两次 → 上一目标未到位时尝试发送第二目标（应被拒绝）→
+含 J4～J6 腕部动作的联合轨迹 → 含一个方向反转点的轨迹。
 
-本次只改 ROS 工作区，**没有修改 F407 固件**。AI 每次更新仍可能执行
-`STOP → WRITE → TRIGGER`；因此不能保证消除固件造成的启停。
-协议只携带位置，不传速度、加速度和时间，实际运动不保证严格复现 MoveIt 时序或加速度。
+日志解读：执行开始输出 `L_arm: plan points=N -> AI segments=M`，每段发布输出
+`AI segment target k/M published`，成功输出 `endpoint confirmed from fresh
+stable feedback; AI target changes=M`。对普通单调轨迹应恒为 `AI segments=1`、
+`AI target changes=1`；若段数异常偏多，先检查轨迹是否真的单调，而不是提高频率。
+
+本次只改 ROS 工作区，**没有修改 F407 固件**。AI 电机每次收到变化的段目标
+仍会执行一次 `STOP → WRITE → TRIGGER`；关键段之间因此存在一次启停，属预期行为。
+协议只携带位置，不传速度、加速度和时间：段内实际路径由电机三段式曲线决定，
+不保证严格复现 MoveIt 中间点、时序或加速度；段间直线运动未经规划场景校验，
+仅适用于开阔空间下的点到点控制，不宣称完整复现 MoveIt 轨迹或动态避障能力。
 反馈确认针对新收到的 ROS 状态消息；现有协议没有逐轴采样时间戳。
-保留默认单臂执行限制。已完成离线逻辑测试，尚未完成 ROS Jazzy 集成或真机验证。
+保留默认单臂执行限制（同臂或任一臂 busy 时新目标直接拒绝，直到终点确认、
+取消或超时中止）。已完成离线逻辑测试，尚未完成 ROS Jazzy 集成或真机验证。
 
 ### F.3 STM32 方向与零位标定
 

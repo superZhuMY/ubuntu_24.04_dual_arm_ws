@@ -1,98 +1,85 @@
-"""Small, ROS-independent helpers for paced position streaming.
+"""Key-segment extraction and endpoint settle gate for segment execution.
 
-Positions are linearly sampled on the original time grid. Derivatives are not
-sent: the F407 protocol carries positions only. This is not a servo drive mode.
+Every key motion segment is sent to the arm exactly once as a complete
+six-axis target; there is no periodic interpolation on this path. The F407
+protocol carries positions only, so key points are the only places where the
+trajectory shape can be preserved at all.
 """
-from bisect import bisect_right
 import math
 
 
-class TimedPath:
-    def __init__(self, times, points):
-        if not times or len(times) != len(points):
-            raise ValueError("empty or mismatched trajectory")
-        if any(not math.isfinite(t) or t < 0 for t in times):
-            raise ValueError("trajectory times must be finite and nonnegative")
-        if any(b <= a for a, b in zip(times, times[1:])):
-            raise ValueError("trajectory times must increase strictly")
-        if any(len(p) != 6 or not all(math.isfinite(q) for q in p) for p in points):
-            raise ValueError("trajectory needs six finite positions per point")
-        self.times, self.points = list(times), [list(p) for p in points]
-        self.end = self.times[-1]
-        # Keep reversals, including a reversal separated by a constant plateau.
-        critical = set()
-        for axis in range(6):
-            sign = 0
-            for i in range(1, len(points)):
-                delta = points[i][axis] - points[i-1][axis]
-                new_sign = 1 if delta > 1e-12 else -1 if delta < -1e-12 else 0
-                if new_sign and sign and new_sign != sign:
-                    critical.add(i-1)
-                if new_sign:
-                    sign = new_sign
-        # Also retain distinct geometric corners (normalise metres/radians).
-        for i in range(1, len(points)-1):
-            scale = [0.01]*3 + [0.1]*3
-            a = [(q-p)/s for p,q,s in zip(points[i-1],points[i],scale)]
-            b = [(q-p)/s for p,q,s in zip(points[i],points[i+1],scale)]
-            norm = math.sqrt(sum(x*x for x in a)*sum(x*x for x in b))
-            if norm > 1e-15 and sum(x*y for x,y in zip(a,b))/norm < math.cos(math.radians(15)):
-                critical.add(i)
-        self.critical = [times[i] for i in sorted(critical)]
-
-    def advance(self, current, dt):
-        proposed = min(self.end, current + dt)
-        for t in self.critical:
-            if current < t <= proposed:
-                return t, True
-        return proposed, proposed >= self.end
-
-    def sample(self, t):
-        if t <= self.times[0]:
-            return self.points[0].copy()
-        if t >= self.end:
-            return self.points[-1].copy()
-        i = bisect_right(self.times, t)-1
-        u = (t-self.times[i])/(self.times[i+1]-self.times[i])
-        return [a+u*(b-a) for a,b in zip(self.points[i], self.points[i+1])]
+def validate_trajectory(times, points):
+    """Reject empty, non-strictly-increasing or malformed trajectories."""
+    if not times or len(times) != len(points):
+        raise ValueError("empty or mismatched trajectory")
+    if any(not math.isfinite(t) or t < 0 for t in times):
+        raise ValueError("trajectory times must be finite and nonnegative")
+    if any(b <= a for a, b in zip(times, times[1:])):
+        raise ValueError("trajectory times must increase strictly")
+    if any(len(p) != 6 or not all(math.isfinite(q) for q in p) for p in points):
+        raise ValueError("trajectory needs six finite positions per point")
 
 
-class TargetPacer:
-    """Separate bus cadences; unchanged AI values remain bit-for-bit identical."""
-    def __init__(self, initial, ai_period, wrist_period, ai_epsilon, wrist_epsilon):
-        self.last = list(initial)
-        self.periods = (ai_period, wrist_period)
-        self.eps = (ai_epsilon, wrist_epsilon)
-        self.sent_at = [-math.inf, -math.inf]
-        self.initialized = False
-        self.counts = [0, 0]
+def extract_key_segments(times, points, corner_angle_deg=15.0,
+                         position_epsilon=0.0002):
+    """Return the indices of the targets that must actually be sent.
 
-    def ready(self, now):
-        return all(now-t >= p for t,p in zip(self.sent_at, self.periods))
-
-    def update(self, desired, now, force=False):
-        if force and not self.ready(now):
-            return None
-        result = self.last.copy()
-        changed = [False, False]
-        for group, begin in enumerate((0,3)):
-            values = desired[begin:begin+3]
-            due = now-self.sent_at[group] >= self.periods[group]
-            different = any(abs(a-b) >= self.eps[group]
-                            for a,b in zip(values,self.last[begin:begin+3]))
-            if force or (due and different):
-                result[begin:begin+3] = values
-                changed[group] = result[begin:begin+3] != self.last[begin:begin+3]
-                self.sent_at[group] = now
-        if result == self.last and self.initialized and not force:
-            return None
-        if not self.initialized or force or any(changed):
-            self.last = result
-            self.initialized = True
-            for i in (0,1):
-                self.counts[i] += int(changed[i])
-            return result.copy()
-        return None
+    Keeps the final point, every joint direction reversal (including ones
+    separated by a plateau) and every significant XYZ corner of the J1-J3
+    composite direction. Dense interpolation points are dropped: a normal
+    monotonic point-to-point trajectory yields only the final point.
+    """
+    validate_trajectory(times, points)
+    count = len(points)
+    keep = set()
+    # Direction reversals via per-axis extremum tracking.  The epsilon
+    # hysteresis keeps feedback/interpolation noise from creating segments
+    # while staying independent of the sampling density.
+    for axis in range(6):
+        direction = 0
+        extremum, extremum_index = points[0][axis], 0
+        for i in range(1, count):
+            value = points[i][axis]
+            if direction == 0:
+                if value > extremum:
+                    direction, extremum, extremum_index = 1, value, i
+                elif value < extremum:
+                    direction, extremum, extremum_index = -1, value, i
+            elif direction > 0:
+                if value >= extremum:
+                    extremum, extremum_index = value, i
+                elif value < extremum-position_epsilon:
+                    keep.add(extremum_index)
+                    direction, extremum, extremum_index = -1, value, i
+            else:
+                if value <= extremum:
+                    extremum, extremum_index = value, i
+                elif value > extremum+position_epsilon:
+                    keep.add(extremum_index)
+                    direction, extremum, extremum_index = 1, value, i
+    # Significant corners of the XYZ composite direction (J1-J3, metres).
+    # Stationary or sub-epsilon intervals do not update the reference leg, so
+    # corners separated by a plateau are still found.
+    corner_cos = math.cos(math.radians(corner_angle_deg))
+    last_dir, last_norm, last_end = None, 0.0, None
+    for i in range(1, count):
+        delta = [points[i][k]-points[i-1][k] for k in range(3)]
+        norm = math.sqrt(sum(x*x for x in delta))
+        if norm <= position_epsilon:
+            continue
+        if last_dir is not None:
+            cos = sum(a*b for a, b in zip(last_dir, delta))/(last_norm*norm)
+            if cos < corner_cos:
+                keep.add(last_end)
+        last_dir, last_norm, last_end = delta, norm, i
+    keep.add(count-1)
+    result = []
+    for i in sorted(keep):
+        if result and all(abs(points[i][k]-points[result[-1]][k]) <= position_epsilon
+                          for k in range(6)):
+            continue
+        result.append(i)
+    return result
 
 
 class EndpointGate:
