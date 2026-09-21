@@ -83,10 +83,11 @@ ros2 launch double_arm_robot_moveit_config e5_moveit.launch.py \
 ros2 launch double_arm_robot_moveit_config f2_stm32_readonly.launch.py \
   stm32_device:=/dev/ttyUSB0
 
-# STM32 + MoveIt（默认 streaming 执行；首次先用下面的逐轴工具确认方向）
+# STM32 + MoveIt（默认 streaming 执行；方向默认值已含 F.3 标定结果，
+# 首次使用仍建议先用下面的逐轴工具复核）
 ros2 launch double_arm_robot_moveit_config stm32_moveit.launch.py \
   stm32_device:=/dev/ttyUSB0 \
-  stm32_joint_directions:=1,1,1,1,1,1,1,1,1,1,1,1 \
+  stm32_joint_directions:=1,1,1,1,-1,1,1,1,1,1,-1,1 \
   stm32_zero_offsets:=0,0,0,0,0,0,0,0,0,0,0,0
 ```
 
@@ -165,6 +166,11 @@ MCU target   = zero_offset + direction × ROS target
 工具以 `/joint_states` 的实际反馈为起点，向已有轨迹控制器发送一条单点
 轨迹，不会自动反向返回。某轴物理正方向与 URDF 不一致时，仅把该轴方向
 改为 `-1`；比例不对则应修正 F407 换算，不能用方向或零偏掩盖。
+
+已标定方向（2026-09-21，真机 MoveIt 实测）：**左右 J5 物理正方向与 URDF
+相反，第 5、11 项为 `-1`**，即 `1,1,1,1,-1,1,1,1,1,1,-1,1`；该值已作为
+`stm32_moveit.launch.py` 的默认方向值。修改方向会同时翻转反馈与目标的
+符号，改动后必须复核该轴零位与限位再恢复运行。
 
 ### 真机轨迹工具 `test/e5_move_joint.py`
 

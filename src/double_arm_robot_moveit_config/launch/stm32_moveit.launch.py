@@ -41,7 +41,9 @@ def generate_launch_description():
         "stm32_state_stale_ms": ("1000", None),
         "stm32_activate_timeout_ms": ("10000", None),
         "stm32_zero_offsets": ("0,0,0,0,0,0,0,0,0,0,0,0", None),
-        "stm32_joint_directions": ("1,1,1,1,1,1,1,1,1,1,1,1", None),
+        # Calibrated on hardware (F.3): J5 of both arms is reversed relative
+        # to the URDF; order is L_Joint_1..L_Joint_6,R_Joint_1..R_Joint_6.
+        "stm32_joint_directions": ("1,1,1,1,-1,1,1,1,1,1,-1,1", None),
         "stm32_read_only": ("false", ["true", "false"]),
         "allow_motor_enable": ("true", ["true", "false"]),
         "start_rviz": ("true", ["true", "false"]),
