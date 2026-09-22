@@ -23,6 +23,7 @@ from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 from moveit_configs_utils import MoveItConfigsBuilder
 
@@ -45,6 +46,15 @@ def generate_launch_description():
         "allow_motor_enable": ("true", ["true", "false"]),
         "start_rviz": ("true", ["true", "false"]),
         "send_manual_goal": ("false", ["true", "false"]),
+        "start_grippers": ("false", ["true", "false"]),
+        "gripper_allow_motion": ("false", ["true", "false"]),
+        "gripper_device": ("/dev/tcp_gripper", None),
+        "left_servo_id": ("1", None),
+        "right_servo_id": ("2", None),
+        "left_open_pulse": ("1450", None),
+        "left_closed_pulse": ("1550", None),
+        "right_open_pulse": ("1450", None),
+        "right_closed_pulse": ("1550", None),
     }
     decls = []
     lcs = {}
@@ -95,9 +105,39 @@ def generate_launch_description():
         moveit_config.robot_description_semantic,
         moveit_config.robot_description_kinematics,
         harvest_motion_file,
+        {
+            "end_effector_enabled": ParameterValue(
+                lcs["start_grippers"], value_type=bool),
+        },
     ]
 
+    gripper_config = PathJoinSubstitution(
+        [FindPackageShare("double_arm_end_effector"),
+         "config", "dual_gripper.yaml"])
+
     nodes = [
+        Node(
+            package="double_arm_end_effector",
+            executable="dual_gripper_controller",
+            name="dual_gripper_controller",
+            output="screen",
+            condition=IfCondition(lcs["start_grippers"]),
+            parameters=[gripper_config, {
+                "device": lcs["gripper_device"],
+                "allow_motion": ParameterValue(
+                    lcs["gripper_allow_motion"], value_type=bool),
+                "left_servo_id": ParameterValue(lcs["left_servo_id"], value_type=int),
+                "right_servo_id": ParameterValue(lcs["right_servo_id"], value_type=int),
+                "left_open_pulse": ParameterValue(
+                    lcs["left_open_pulse"], value_type=int),
+                "left_closed_pulse": ParameterValue(
+                    lcs["left_closed_pulse"], value_type=int),
+                "right_open_pulse": ParameterValue(
+                    lcs["right_open_pulse"], value_type=int),
+                "right_closed_pulse": ParameterValue(
+                    lcs["right_closed_pulse"], value_type=int),
+            }],
+        ),
         Node(
             package="double_arm_harvest_execution",
             executable="dual_arm_harvest_executor",

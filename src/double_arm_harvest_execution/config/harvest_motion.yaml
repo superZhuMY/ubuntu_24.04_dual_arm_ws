@@ -44,9 +44,17 @@ dual_arm_harvest_executor:
     right_pick_offset_tool: [0.0, 0.0, 0.0]
     right_retreat_offset_tool: [0.0, 0.0, -0.04]
 
-    # Reserved stages; skipped (logged) until the end effector and the place
-    # point are commissioned.
+    # END_EFFECTOR closes both enabled grippers through one dual-gripper
+    # action. Position is normalized: 0.0=open, 1.0=closed. The gripper node
+    # maps it to the independently calibrated left/right pulse values.
     end_effector_enabled: false
+    gripper_action_name: /dual_gripper/command
+    gripper_open_position: 0.0
+    gripper_close_position: 1.0
+    gripper_duration_ms: 800
+    gripper_action_timeout_sec: 8.0
+
+    # PLACE/RELEASE remain reserved until a placement target is defined.
     place_enabled: false
 
     # dry_run:   validate targets and walk the state machine without planning

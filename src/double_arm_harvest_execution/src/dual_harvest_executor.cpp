@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <future>
 #include <thread>
 #include <utility>
 
@@ -22,8 +23,8 @@ namespace
 
 /// Task-level stage order (plan doc 8.1). Reserved stages are skipped while
 /// their hardware is not enabled.
-constexpr std::array<Stage, 8> kStageOrder = {
-  Stage::VALIDATE, Stage::APPROACH, Stage::PICK, Stage::END_EFFECTOR,
+constexpr std::array<Stage, 9> kStageOrder = {
+  Stage::VALIDATE, Stage::PREPARE_GRIPPER, Stage::APPROACH, Stage::PICK, Stage::END_EFFECTOR,
   Stage::RETREAT, Stage::PLACE, Stage::RELEASE, Stage::HOME,
 };
 
@@ -46,6 +47,7 @@ std::string stage_name(Stage stage)
 {
   switch (stage) {
     case Stage::VALIDATE: return "VALIDATE";
+    case Stage::PREPARE_GRIPPER: return "PREPARE_GRIPPER";
     case Stage::APPROACH: return "APPROACH";
     case Stage::PICK: return "PICK";
     case Stage::END_EFFECTOR: return "END_EFFECTOR";
@@ -114,6 +116,12 @@ DualHarvestExecutor::DualHarvestExecutor(const rclcpp::NodeOptions & options)
   right_retreat_offset_ = get_offset_param("right_retreat_offset_tool");
 
   end_effector_enabled_ = get_or_declare<bool>("end_effector_enabled", false);
+  gripper_action_name_ = get_or_declare<std::string>(
+    "gripper_action_name", "/dual_gripper/command");
+  gripper_open_position_ = get_or_declare<double>("gripper_open_position", 0.0);
+  gripper_close_position_ = get_or_declare<double>("gripper_close_position", 1.0);
+  gripper_duration_ms_ = get_or_declare<int64_t>("gripper_duration_ms", 800);
+  gripper_action_timeout_sec_ = get_or_declare<double>("gripper_action_timeout_sec", 8.0);
   place_enabled_ = get_or_declare<bool>("place_enabled", false);
   dry_run_ = get_or_declare<bool>("dry_run", false);
   plan_only_ = get_or_declare<bool>("plan_only", false);
@@ -131,10 +139,18 @@ DualHarvestExecutor::DualHarvestExecutor(const rclcpp::NodeOptions & options)
   {
     throw std::runtime_error("sync/timeouts must be positive");
   }
+  if (gripper_open_position_ < 0.0 || gripper_open_position_ > 1.0 ||
+    gripper_close_position_ < 0.0 || gripper_close_position_ > 1.0 ||
+    gripper_duration_ms_ < 0 || gripper_duration_ms_ > 9999 ||
+    gripper_action_timeout_sec_ <= 0.0)
+  {
+    throw std::runtime_error("gripper position, duration, or timeout is invalid");
+  }
 
   server_cb_group_ = create_callback_group(rclcpp::CallbackGroupType::Reentrant);
   state_cb_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
   fjt_cb_group_ = create_callback_group(rclcpp::CallbackGroupType::Reentrant);
+  gripper_cb_group_ = create_callback_group(rclcpp::CallbackGroupType::Reentrant);
 
   action_server_ = rclcpp_action::create_server<ExecuteDualHarvest>(
     this, "execute_dual_harvest",
@@ -217,6 +233,19 @@ void DualHarvestExecutor::init_move_groups()
       kLeftFjtAction, kRightFjtAction);
   }
 
+  if (end_effector_enabled_) {
+    gripper_client_ = rclcpp_action::create_client<DualGripperCommand>(
+      shared_from_this(), gripper_action_name_, gripper_cb_group_);
+    if (!gripper_client_->wait_for_action_server(std::chrono::seconds(10))) {
+      RCLCPP_ERROR(
+        get_logger(), "gripper action server is not available at %s",
+        gripper_action_name_.c_str());
+      return;
+    }
+    RCLCPP_INFO(
+      get_logger(), "gripper action connected: %s", gripper_action_name_.c_str());
+  }
+
   move_groups_ready_ = true;
   RCLCPP_INFO(
     get_logger(),
@@ -224,6 +253,64 @@ void DualHarvestExecutor::init_move_groups()
     left_group_.c_str(), left_arm_->getJointNames().size(),
     right_group_.c_str(), right_arm_->getJointNames().size(),
     planning_frame_.c_str());
+}
+
+bool DualHarvestExecutor::run_gripper_command(
+  bool left_enabled, bool right_enabled, double position, std::string & error)
+{
+  if (!gripper_client_) {
+    error = "gripper action client is not initialized";
+    return false;
+  }
+
+  DualGripperCommand::Goal goal;
+  goal.command_left = left_enabled;
+  goal.command_right = right_enabled;
+  goal.left_position = static_cast<float>(position);
+  goal.right_position = static_cast<float>(position);
+  goal.duration_ms = static_cast<uint32_t>(gripper_duration_ms_);
+
+  const auto deadline = std::chrono::steady_clock::now() +
+    std::chrono::duration<double>(gripper_action_timeout_sec_);
+  auto goal_future = gripper_client_->async_send_goal(goal);
+  while (goal_future.wait_for(std::chrono::milliseconds(50)) != std::future_status::ready) {
+    if (cancel_requested_.load()) {
+      error = "canceled while waiting for gripper goal acceptance";
+      return false;
+    }
+    if (std::chrono::steady_clock::now() >= deadline) {
+      error = "gripper action did not accept the goal before timeout";
+      return false;
+    }
+  }
+  const auto gripper_goal = goal_future.get();
+  if (!gripper_goal) {
+    error = "gripper goal was rejected (check allow_motion and calibration)";
+    return false;
+  }
+
+  auto result_future = gripper_client_->async_get_result(gripper_goal);
+  while (result_future.wait_for(std::chrono::milliseconds(50)) != std::future_status::ready) {
+    if (cancel_requested_.load()) {
+      (void)gripper_client_->async_cancel_goal(gripper_goal);
+      error = "canceled while moving grippers";
+      return false;
+    }
+    if (std::chrono::steady_clock::now() >= deadline) {
+      (void)gripper_client_->async_cancel_goal(gripper_goal);
+      error = "gripper action timed out and was canceled";
+      return false;
+    }
+  }
+
+  const auto wrapped = result_future.get();
+  if (wrapped.code != rclcpp_action::ResultCode::SUCCEEDED || !wrapped.result ||
+    !wrapped.result->success)
+  {
+    error = wrapped.result ? wrapped.result->message : "gripper action returned no result";
+    return false;
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -773,10 +860,36 @@ void DualHarvestExecutor::execute(const std::shared_ptr<GoalHandleHarvest> goal_
       return;
     }
 
-    // Reserved stages: skipped until the hardware is commissioned.
-    if (stage == Stage::END_EFFECTOR) {
+    // End-effector stages use the dedicated dual-servo action. Place/release
+    // stay reserved until the placement part of the task is commissioned.
+    if (stage == Stage::PREPARE_GRIPPER || stage == Stage::END_EFFECTOR) {
       if (end_effector_enabled_) {
-        fail(stage_name(stage), "end effector interface is not implemented yet (H6)");
+        const std::string stage_str = stage_name(stage);
+        if (plan_only_) {
+          RCLCPP_INFO(
+            get_logger(), "[task=%s][%s] plan_only: gripper command skipped",
+            task_id.c_str(), stage_str.c_str());
+          continue;
+        }
+        publish_stage_feedback(
+          goal_handle, left_enabled ? stage_str : "", right_enabled ? stage_str : "",
+          left_progress, right_progress,
+          stage == Stage::PREPARE_GRIPPER ? "opening enabled grippers" :
+          "closing enabled grippers");
+        std::string gripper_error;
+        const double position = stage == Stage::PREPARE_GRIPPER ?
+          gripper_open_position_ : gripper_close_position_;
+        if (!run_gripper_command(left_enabled, right_enabled, position, gripper_error)) {
+          if (cancel_requested_.load()) {
+            finish_canceled(stage_str);
+          } else {
+            fail(stage_str, gripper_error);
+          }
+          return;
+        }
+        RCLCPP_INFO(
+          get_logger(), "[task=%s][%s] both enabled grippers confirmed at target",
+          task_id.c_str(), stage_str.c_str());
       } else {
         RCLCPP_INFO(
           get_logger(), "[task=%s][%s] skipped: end effector disabled",

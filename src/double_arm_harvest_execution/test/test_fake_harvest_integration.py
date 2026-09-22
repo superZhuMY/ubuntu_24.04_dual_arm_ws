@@ -2,7 +2,8 @@
 
 Brings up the full production chain on mock hardware
 (harvest_fake.launch.py: mock ros2_control -> ForwardCommandControllers ->
-streaming_trajectory_executor -> move_group -> dual_arm_harvest_executor)
+streaming_trajectory_executor -> move_group -> dual_arm_harvest_executor, plus
+the dual-gripper mock action server)
 and exercises two task outcomes:
 
 1. one coordinated dual-arm task runs end to end and returns SUCCEEDED;
@@ -48,7 +49,10 @@ def generate_test_description():
         launch.actions.IncludeLaunchDescription(
             launch.launch_description_sources.PythonLaunchDescriptionSource(
                 fake_launch),
-            launch_arguments={"start_rviz": "false"}.items(),
+            launch_arguments={
+                "start_rviz": "false",
+                "mock_grippers": "true",
+            }.items(),
         ),
         launch_testing.actions.ReadyToTest(),
     ])

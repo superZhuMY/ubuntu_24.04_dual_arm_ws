@@ -86,7 +86,8 @@ ros2 run double_arm_harvest_execution send_manual_harvest_goal.py --no-right   #
 ## 5. 已知边界（第一版设计边界，非缺陷）
 
 - 不做左右臂互碰检测与 12 轴联合规划（两臂工作空间分离前提下使用）；
-- `END_EFFECTOR/PLACE/RELEASE` 阶段保留状态与配置，`enabled=false` 时记录 skipped；
+- `PREPARE_GRIPPER/END_EFFECTOR` 已通过 USB/TTL 双舵机 Action 实现；默认关闭，接线、
+  标定与验收见 `docs/dual_gripper_integration.md`；`PLACE/RELEASE` 仍为预留阶段；
 - 失败后保持当前位置等待人工处理，不自动回 Home；
 - MoveIt 规划期间到达的取消在规划完成后生效（单次规划 ≤ planning_time_sec）。
 

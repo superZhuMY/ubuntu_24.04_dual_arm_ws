@@ -1,0 +1,31 @@
+dual_gripper_controller:
+  ros__parameters:
+    # USB/TTL single-bus debug board. Use a persistent udev symlink rather
+    # than /dev/ttyUSBx, whose number can change after reconnecting.
+    device: /dev/tcp_gripper
+    baud_rate: 115200
+
+    # One shared bus, two unique servo IDs. Configure these IDs with the
+    # vendor tool before connecting both servos; factory default is ID 0.
+    left_servo_id: 1
+    right_servo_id: 2
+
+    # Calibrate on the actual gripper. Reversing open/closed values is valid
+    # and automatically handles a mirrored linkage.
+    # Defaults deliberately span only 100 us for the first no-load test.
+    left_open_pulse: 1450
+    left_closed_pulse: 1550
+    right_open_pulse: 1450
+    right_closed_pulse: 1550
+
+    # The move command has no completion ACK. Completion is confirmed by
+    # PRAD position polling from both servos.
+    read_timeout_ms: 120
+    poll_hz: 10.0
+    tolerance_pulse: 20
+    stable_samples: 2
+    goal_timeout_sec: 5.0
+
+    # No motion is sent until this is explicitly enabled after calibration.
+    allow_motion: false
+    mock_hardware: false

@@ -3,7 +3,7 @@
 从 `~/tomato/test1` 分离出的活跃工程。**含可直接构建、已验证的源码**，已剔除历史 zip 快照与一次性参考资料。
 
 - 平台：Ubuntu 24.04 + ROS 2 Jazzy
-- 当前源码包含 5 个 ROS2 包；原有硬件包构建基线为 294 用例 / 0 失败
+- 当前源码包含 8 个 ROS2 包；原有硬件包构建基线为 294 用例 / 0 失败
 - 源码来源：`test1/src/`（与 `test1/src_v8.zip` 逐文件一致，零差异）
 
 ## 目录结构
@@ -12,12 +12,18 @@
 src/
   double_arm_hardware/            核心包：硬件插件 + 协议 + 传输层 + readonly_check
   double_arm_sparse_execution/    STM32 关键段执行 + 终点反馈确认（保留旧稀疏模式）
+  double_arm_harvest_interfaces/  双臂采摘与双夹爪 Action 接口
+  double_arm_harvest_execution/   双臂采摘状态机 + MoveIt/夹爪同步屏障
+  double_arm_end_effector/        Type-C USB/TTL 单总线双舵机夹爪驱动
   double_arm_robot/               URDF/xacro、mesh、显示 launch
   double_arm_robot_moveit_config/ SRDF、kinematics、控制器 YAML、全部 launch
   double_arm_jaka_interfaces/     自定义 msg/srv/action
 test/                             真机测试工具（e5_move_joint.py 等）
 docs/                             阶段性报告链与测试日志
 ```
+
+夹爪接线、ID 设置、脉宽标定、独立测试和整套采摘启动见
+[`docs/dual_gripper_integration.md`](docs/dual_gripper_integration.md)。
 
 ## 两条控制路径
 

@@ -23,6 +23,7 @@
 #include <vector>
 
 #include <control_msgs/action/follow_joint_trajectory.hpp>
+#include <double_arm_harvest_interfaces/action/dual_gripper_command.hpp>
 #include <double_arm_harvest_interfaces/action/execute_dual_harvest.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <rclcpp/rclcpp.hpp>
@@ -64,6 +65,7 @@ struct ArmStagePlan
 enum class Stage
 {
   VALIDATE,
+  PREPARE_GRIPPER,
   APPROACH,
   PICK,
   END_EFFECTOR,
@@ -85,6 +87,7 @@ public:
   using HarvestGoal = ExecuteDualHarvest::Goal;
   using GoalHandleHarvest = rclcpp_action::ServerGoalHandle<ExecuteDualHarvest>;
   using FollowJointTrajectory = control_msgs::action::FollowJointTrajectory;
+  using DualGripperCommand = double_arm_harvest_interfaces::action::DualGripperCommand;
 
   explicit DualHarvestExecutor(const rclcpp::NodeOptions & options);
   ~DualHarvestExecutor() override;
@@ -141,6 +144,11 @@ private:
     bool left_enabled, bool right_enabled, ArmStagePlan & left_plan,
     ArmStagePlan & right_plan, std::string & error);
 
+  /// Move the enabled grippers through the single-bus controller and wait
+  /// until both position-feedback checks finish.
+  bool run_gripper_command(
+    bool left_enabled, bool right_enabled, double position, std::string & error);
+
   /// Cancel every arm whose goal is still outstanding and wait for the
   /// cancel results up to cancel_timeout_sec_.
   void cancel_outstanding_arms();
@@ -179,6 +187,11 @@ private:
   std::array<double, 3> right_pick_offset_{};
   std::array<double, 3> right_retreat_offset_{};
   bool end_effector_enabled_{false};
+  std::string gripper_action_name_;
+  double gripper_open_position_{0.0};
+  double gripper_close_position_{1.0};
+  int gripper_duration_ms_{800};
+  double gripper_action_timeout_sec_{8.0};
   bool place_enabled_{false};
   bool dry_run_{false};
   bool plan_only_{false};
@@ -195,7 +208,9 @@ private:
   rclcpp::CallbackGroup::SharedPtr server_cb_group_;
   rclcpp::CallbackGroup::SharedPtr state_cb_group_;
   rclcpp::CallbackGroup::SharedPtr fjt_cb_group_;
+  rclcpp::CallbackGroup::SharedPtr gripper_cb_group_;
   rclcpp_action::Server<ExecuteDualHarvest>::SharedPtr action_server_;
+  rclcpp_action::Client<DualGripperCommand>::SharedPtr gripper_client_;
   std::shared_ptr<TrajectoryDispatcher> dispatcher_;
   std::mutex goal_gate_mutex_;
   bool busy_{false};

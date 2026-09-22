@@ -1,0 +1,20 @@
+# Normalized gripper command. 0.0 is the calibrated open position and 1.0 is
+# the calibrated closed position. Both enabled servos are started by one write
+# on the shared half-duplex bus.
+bool command_left
+bool command_right
+float32 left_position
+float32 right_position
+uint32 duration_ms
+---
+bool success
+bool left_success
+bool right_success
+int32 left_pulse
+int32 right_pulse
+string message
+---
+float32 left_position
+float32 right_position
+bool left_reached
+bool right_reached

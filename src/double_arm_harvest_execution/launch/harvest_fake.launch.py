@@ -38,6 +38,7 @@ def generate_launch_description():
         "plan_only": ("false", ["true", "false"]),
         "dry_run": ("false", ["true", "false"]),
         "send_manual_goal": ("false", ["true", "false"]),
+        "mock_grippers": ("false", ["true", "false"]),
     }
     decls = []
     lcs = {}
@@ -74,10 +75,27 @@ def generate_launch_description():
         {
             "plan_only": ParameterValue(lcs["plan_only"], value_type=bool),
             "dry_run": ParameterValue(lcs["dry_run"], value_type=bool),
+            "end_effector_enabled": ParameterValue(
+                lcs["mock_grippers"], value_type=bool),
         },
     ]
 
+    gripper_config = PathJoinSubstitution(
+        [FindPackageShare("double_arm_end_effector"),
+         "config", "dual_gripper.yaml"])
+
     nodes = [
+        Node(
+            package="double_arm_end_effector",
+            executable="dual_gripper_controller",
+            name="dual_gripper_controller",
+            output="screen",
+            condition=IfCondition(lcs["mock_grippers"]),
+            parameters=[gripper_config, {
+                "mock_hardware": True,
+                "allow_motion": True,
+            }],
+        ),
         Node(
             package="double_arm_harvest_execution",
             executable="dual_arm_harvest_executor",
