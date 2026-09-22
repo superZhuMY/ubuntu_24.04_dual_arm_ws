@@ -42,6 +42,8 @@ set(HARVEST_DEPS
 add_library(harvest_core STATIC
   src/pose_utils.cpp
   src/failure_policy.cpp
+  src/stage_barrier.cpp
+  src/trajectory_dispatcher.cpp
   src/dual_harvest_executor.cpp
 )
 target_include_directories(harvest_core PUBLIC
@@ -65,6 +67,15 @@ if(BUILD_TESTING)
   ament_add_gtest(test_pose_utils test/test_pose_utils.cpp)
   target_include_directories(test_pose_utils PRIVATE include)
   target_link_libraries(test_pose_utils harvest_core)
+
+  ament_add_gtest(test_stage_barrier test/test_stage_barrier.cpp)
+  target_include_directories(test_stage_barrier PRIVATE include)
+  target_link_libraries(test_stage_barrier harvest_core)
+
+  ament_add_gtest(test_sync_stamp test/test_sync_stamp.cpp)
+  target_include_directories(test_sync_stamp PRIVATE include)
+  target_link_libraries(test_sync_stamp harvest_core)
+  ament_target_dependencies(test_sync_stamp rclcpp trajectory_msgs)
 endif()
 
 ament_package()

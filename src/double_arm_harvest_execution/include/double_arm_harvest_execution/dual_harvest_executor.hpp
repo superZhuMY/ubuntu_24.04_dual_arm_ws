@@ -15,6 +15,7 @@
 
 #include <array>
 #include <atomic>
+#include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -31,6 +32,8 @@
 
 #include "double_arm_harvest_execution/failure_policy.hpp"
 #include "double_arm_harvest_execution/pose_utils.hpp"
+#include "double_arm_harvest_execution/stage_barrier.hpp"
+#include "double_arm_harvest_execution/trajectory_dispatcher.hpp"
 
 namespace moveit
 {
@@ -130,6 +133,18 @@ private:
     moveit::planning_interface::MoveGroupInterface & arm,
     const std::string & named_target);
 
+  /// Dispatch both trajectories with one shared start time and wait until the
+  /// stage barrier reaches a final verdict. Returns true when the stage may
+  /// advance; otherwise `error` carries the reason (or "canceled").
+  bool run_stage_dispatch(
+    const std::string & task_id, const std::string & stage_str,
+    bool left_enabled, bool right_enabled, ArmStagePlan & left_plan,
+    ArmStagePlan & right_plan, std::string & error);
+
+  /// Cancel every arm whose goal is still outstanding and wait for the
+  /// cancel results up to cancel_timeout_sec_.
+  void cancel_outstanding_arms();
+
   void publish_stage_feedback(
     const std::shared_ptr<GoalHandleHarvest> & goal_handle,
     const std::string & left_stage,
@@ -176,11 +191,20 @@ private:
   // ---- action server / task gate ----
   rclcpp::CallbackGroup::SharedPtr server_cb_group_;
   rclcpp::CallbackGroup::SharedPtr state_cb_group_;
+  rclcpp::CallbackGroup::SharedPtr fjt_cb_group_;
   rclcpp_action::Server<ExecuteDualHarvest>::SharedPtr action_server_;
+  std::shared_ptr<TrajectoryDispatcher> dispatcher_;
   std::mutex goal_gate_mutex_;
   bool busy_{false};
   std::atomic<bool> cancel_requested_{false};
   TargetLedger target_ledger_;
+
+  // ---- stage barrier / dispatch synchronisation ----
+  StageBarrier barrier_;
+  std::mutex stage_mutex_;
+  std::condition_variable stage_cv_;
+  std::string last_left_error_;
+  std::string last_right_error_;
 
   // ---- joint state monitor ----
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_sub_;

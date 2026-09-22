@@ -27,6 +27,11 @@ constexpr std::array<Stage, 8> kStageOrder = {
 
 constexpr std::size_t kMotionStageCount = 4;  // APPROACH, PICK, RETREAT, HOME
 
+/// Existing FollowJointTrajectory servers of the sparse/streaming execution
+/// chain (plan doc section 2). Do not change without the hardware layer.
+constexpr const char * kLeftFjtAction = "/double_arm_robot/l_arm/follow_joint_trajectory";
+constexpr const char * kRightFjtAction = "/double_arm_robot/r_arm/follow_joint_trajectory";
+
 std::string offset_to_string(const std::array<double, 3> & offset)
 {
   return "[" + std::to_string(offset[0]) + ", " + std::to_string(offset[1]) +
@@ -127,6 +132,7 @@ DualHarvestExecutor::DualHarvestExecutor(const rclcpp::NodeOptions & options)
 
   server_cb_group_ = create_callback_group(rclcpp::CallbackGroupType::Reentrant);
   state_cb_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+  fjt_cb_group_ = create_callback_group(rclcpp::CallbackGroupType::Reentrant);
 
   action_server_ = rclcpp_action::create_server<ExecuteDualHarvest>(
     this, "execute_dual_harvest",
@@ -181,6 +187,28 @@ void DualHarvestExecutor::init_move_groups()
     return;
   }
   planning_frame_ = left_arm_->getPlanningFrame();
+
+  TrajectoryDispatcher::Hooks hooks;
+  hooks.on_goal_response = [this](bool left, bool accepted) {
+      barrier_.on_goal_response(left ? StageBarrier::LEFT : StageBarrier::RIGHT, accepted);
+      std::lock_guard<std::mutex> lock(stage_mutex_);
+      stage_cv_.notify_all();
+    };
+  hooks.on_result = [this](bool left, bool success, const std::string & error) {
+      barrier_.on_result(left ? StageBarrier::LEFT : StageBarrier::RIGHT, success);
+      std::lock_guard<std::mutex> lock(stage_mutex_);
+      (left ? last_left_error_ : last_right_error_) = success ? "" : error;
+      stage_cv_.notify_all();
+    };
+  dispatcher_ = std::make_shared<TrajectoryDispatcher>(
+    shared_from_this(), kLeftFjtAction, kRightFjtAction, left_group_, right_group_,
+    hooks, fjt_cb_group_);
+  if (!dispatcher_->wait_for_servers(10.0)) {
+    RCLCPP_ERROR(
+      get_logger(), "FollowJointTrajectory servers not available at %s / %s",
+      kLeftFjtAction, kRightFjtAction);
+  }
+
   move_groups_ready_ = true;
   RCLCPP_INFO(
     get_logger(),
@@ -232,8 +260,12 @@ rclcpp_action::CancelResponse DualHarvestExecutor::on_cancel(
   const std::shared_ptr<GoalHandleHarvest> /*goal_handle*/)
 {
   RCLCPP_WARN(get_logger(), "Cancel requested for the active harvest task");
+  barrier_.request_cancel();
   cancel_requested_.store(true);
-  // H4: the dispatcher additionally cancels both FollowJointTrajectory goals.
+  {
+    std::lock_guard<std::mutex> lock(stage_mutex_);
+    stage_cv_.notify_all();
+  }
   return rclcpp_action::CancelResponse::ACCEPT;
 }
 
@@ -380,6 +412,105 @@ ArmStagePlan DualHarvestExecutor::plan_arm_named(
   out.trajectory = plan.trajectory.joint_trajectory;
   out.success = true;
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// stage dispatch barrier
+// ---------------------------------------------------------------------------
+
+void DualHarvestExecutor::cancel_outstanding_arms()
+{
+  const bool cancel_left = barrier_.needs_cancel(StageBarrier::LEFT);
+  const bool cancel_right = barrier_.needs_cancel(StageBarrier::RIGHT);
+  if (cancel_left) {
+    dispatcher_->cancel(true);
+  }
+  if (cancel_right) {
+    dispatcher_->cancel(false);
+  }
+  if (!cancel_left && !cancel_right) {
+    return;
+  }
+
+  // Wait for the cancel results up to cancel_timeout_sec_; a late result is
+  // logged and the streaming executor holds the last position anyway.
+  const auto deadline =
+    std::chrono::steady_clock::now() + std::chrono::duration<double>(cancel_timeout_sec_);
+  std::unique_lock<std::mutex> lock(stage_mutex_);
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (!barrier_.needs_cancel(StageBarrier::LEFT) &&
+      !barrier_.needs_cancel(StageBarrier::RIGHT))
+    {
+      return;
+    }
+    stage_cv_.wait_for(lock, std::chrono::milliseconds(50));
+  }
+  RCLCPP_WARN(
+    get_logger(), "peer cancellation not confirmed within %.1fs", cancel_timeout_sec_);
+}
+
+bool DualHarvestExecutor::run_stage_dispatch(
+  const std::string & task_id, const std::string & stage_str, bool left_enabled,
+  bool right_enabled, ArmStagePlan & left_plan, ArmStagePlan & right_plan,
+  std::string & error)
+{
+  barrier_.reset(left_enabled, right_enabled);
+  {
+    std::lock_guard<std::mutex> lock(stage_mutex_);
+    last_left_error_.clear();
+    last_right_error_.clear();
+  }
+
+  dispatcher_->dispatch(left_plan.trajectory, right_plan.trajectory, sync_start_delay_sec_);
+  const rclcpp::Time shared_start =
+    now() + rclcpp::Duration::from_seconds(sync_start_delay_sec_);
+  RCLCPP_INFO(
+    get_logger(), "[task=%s][%s] dispatch start=%.6f (both arms share this stamp)",
+    task_id.c_str(), stage_str.c_str(), shared_start.seconds());
+
+  const auto deadline =
+    std::chrono::steady_clock::now() + std::chrono::duration<double>(stage_timeout_sec_);
+  {
+    std::unique_lock<std::mutex> lock(stage_mutex_);
+    stage_cv_.wait_until(
+      lock, deadline, [this] {return barrier_.verdict() != StageBarrier::Verdict::WAIT;});
+  }
+
+  StageBarrier::Verdict verdict = barrier_.verdict();
+  if (verdict == StageBarrier::Verdict::WAIT) {
+    barrier_.mark_stage_timeout();
+    verdict = StageBarrier::Verdict::TIMEOUT;
+  }
+
+  switch (verdict) {
+    case StageBarrier::Verdict::ADVANCE:
+      return true;
+    case StageBarrier::Verdict::CANCELED:
+      cancel_outstanding_arms();
+      error = "canceled by client";
+      return false;
+    case StageBarrier::Verdict::TIMEOUT:
+      cancel_outstanding_arms();
+      error = "stage timed out after " + std::to_string(stage_timeout_sec_) +
+              "s; outstanding goals canceled";
+      return false;
+    case StageBarrier::Verdict::ABORT: {
+      cancel_outstanding_arms();
+      error = barrier_.abort_reason();
+      std::lock_guard<std::mutex> lock(stage_mutex_);
+      if (!last_left_error_.empty()) {
+        error += "; left error: " + last_left_error_;
+      }
+      if (!last_right_error_.empty()) {
+        error += "; right error: " + last_right_error_;
+      }
+      return false;
+    }
+    case StageBarrier::Verdict::WAIT:
+    default:
+      error = "stage barrier returned WAIT unexpectedly";
+      return false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -637,18 +768,42 @@ void DualHarvestExecutor::execute(const std::shared_ptr<GoalHandleHarvest> goal_
         get_logger(), "[task=%s][%s] plan_only: dispatch skipped", task_id.c_str(),
         stage_str.c_str());
       completed_motion += 1;
-      left_progress = left_enabled ? static_cast<float>(completed_motion) / kMotionStageCount : 0.0f;
-      right_progress = right_enabled ? static_cast<float>(completed_motion) / kMotionStageCount : 0.0f;
+      left_progress =
+        left_enabled ? static_cast<float>(completed_motion) / kMotionStageCount : 0.0f;
+      right_progress =
+        right_enabled ? static_cast<float>(completed_motion) / kMotionStageCount : 0.0f;
       publish_stage_feedback(
         goal_handle, left_enabled ? stage_str : "", right_enabled ? stage_str : "",
         left_progress, right_progress, stage_str + " planned (plan_only)");
       continue;
     }
 
-    // H3: dispatch both trajectories with one shared start time and wait for
-    // the stage barrier. Until then refuse to pretend the stage executed.
-    fail(stage_str, "trajectory dispatch is not implemented yet (H3)");
-    return;
+    std::string dispatch_error;
+    if (!run_stage_dispatch(
+        task_id, stage_str, left_enabled, right_enabled, left_plan, right_plan,
+        dispatch_error))
+    {
+      // Nothing advances after a failure or cancel; hold position and stop.
+      if (cancel_requested_.load()) {
+        finish_canceled(stage_str);
+      } else {
+        fail(stage_str, dispatch_error);
+      }
+      return;
+    }
+
+    completed_motion += 1;
+    left_progress =
+      left_enabled ? static_cast<float>(completed_motion) / kMotionStageCount : 0.0f;
+    right_progress =
+      right_enabled ? static_cast<float>(completed_motion) / kMotionStageCount : 0.0f;
+    publish_stage_feedback(
+      goal_handle, left_enabled ? stage_str : "", right_enabled ? stage_str : "",
+      left_progress, right_progress, stage_str + " completed");
+    RCLCPP_INFO(
+      get_logger(), "[task=%s][%s] completed: left=%s right=%s",
+      task_id.c_str(), stage_str.c_str(),
+      left_enabled ? "SUCCESS" : "skipped", right_enabled ? "SUCCESS" : "skipped");
   }
 
   publish_stage_feedback(
