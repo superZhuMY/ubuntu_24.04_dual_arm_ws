@@ -33,8 +33,12 @@ bool TrajectoryDispatcher::wait_for_servers(double timeout_sec) const
 
 void TrajectoryDispatcher::dispatch(
   trajectory_msgs::msg::JointTrajectory & left,
-  trajectory_msgs::msg::JointTrajectory & right, double sync_delay_sec)
+  trajectory_msgs::msg::JointTrajectory & right, double sync_delay_sec,
+  bool send_left, bool send_right)
 {
+  if (!send_left && !send_right) {
+    return;
+  }
   // One shared scheduled start; the streaming executor waits for it before
   // publishing any target, which synchronises the first motion of both arms.
   const rclcpp::Time start_time =
@@ -44,6 +48,10 @@ void TrajectoryDispatcher::dispatch(
 
   std::lock_guard<std::mutex> lock(goals_mutex_);
   for (int side = 0; side < 2; ++side) {
+    const bool send = (side == 0) ? send_left : send_right;
+    if (!send) {
+      continue;  // never send a goal for a disabled arm
+    }
     FollowJointTrajectory::Goal goal;
     goal.trajectory = (side == 0) ? left : right;
 

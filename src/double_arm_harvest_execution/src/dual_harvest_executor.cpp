@@ -3,7 +3,9 @@
 #include "double_arm_harvest_execution/dual_harvest_executor.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <thread>
 #include <utility>
 
 #include <moveit/move_group_interface/move_group_interface.hpp>
@@ -157,6 +159,12 @@ DualHarvestExecutor::DualHarvestExecutor(const rclcpp::NodeOptions & options)
   tf_buffer_ = std::make_unique<tf2_ros::Buffer>(get_clock());
   tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_, this, false);
 
+  // Republish the latest stage state at 2 Hz so feedback stays alive during
+  // long real-hardware stages (doc section 18: no per-callback spam).
+  feedback_timer_ = create_wall_timer(
+    std::chrono::milliseconds(500),
+    std::bind(&DualHarvestExecutor::feedback_timer_tick, this), state_cb_group_);
+
   RCLCPP_INFO(
     get_logger(),
     "dual_arm_harvest_executor ready: base=%s left=%s right=%s "
@@ -253,6 +261,9 @@ rclcpp_action::GoalResponse DualHarvestExecutor::on_goal(
     return rclcpp_action::GoalResponse::REJECT;
   }
   busy_ = true;
+  // The busy gate guarantees the previous task is fully finished, so a stale
+  // cancel flag from it must never leak into this task.
+  cancel_requested_.store(false);
   return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
 }
 
@@ -273,7 +284,25 @@ void DualHarvestExecutor::on_accepted(const std::shared_ptr<GoalHandleHarvest> g
 {
   // Runs on a MultiThreadedExecutor thread; blocks for the whole task. The
   // reentrant server group keeps goal/cancel callbacks alive meanwhile.
-  execute(goal_handle);
+  // Nothing may escape: a destroyed goal handle that never reached a terminal
+  // state makes rclcpp_action try to cancel it in its destructor, which can
+  // throw and kill the process.
+  try {
+    execute(goal_handle);
+  } catch (const std::exception & ex) {
+    RCLCPP_ERROR(get_logger(), "harvest task crashed: %s", ex.what());
+    auto result = std::make_shared<ExecuteDualHarvest::Result>();
+    result->success = false;
+    result->left_success = false;
+    result->right_success = false;
+    result->failed_stage = "INTERNAL";
+    result->message = std::string("internal error: ") + ex.what();
+    try {
+      goal_handle->abort(result);
+    } catch (const std::exception & inner) {
+      RCLCPP_ERROR(get_logger(), "abort() after crash also failed: %s", inner.what());
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -284,29 +313,11 @@ std::optional<std::string> DualHarvestExecutor::validate_target(
   const double_arm_harvest_interfaces::msg::HarvestTarget & target,
   const std::string & arm_side) const
 {
-  if (target.target_id.empty()) {
-    return arm_side + ": empty target_id";
+  const std::string error = validate_harvest_target(target, base_frame_, min_confidence_);
+  if (error.empty()) {
+    return std::nullopt;
   }
-  if (target.target_pose.header.frame_id != base_frame_) {
-    return arm_side + ": frame_id '" + target.target_pose.header.frame_id +
-           "' must be '" + base_frame_ + "'";
-  }
-  if (!is_finite_pose(target.target_pose.pose)) {
-    return arm_side + ": target pose contains non-finite values";
-  }
-  geometry_msgs::msg::Quaternion q = target.target_pose.pose.orientation;
-  if (!normalize_quaternion(q)) {
-    return arm_side + ": orientation is zero, non-finite or too far from unit norm";
-  }
-  if (!std::isfinite(target.confidence) || target.confidence < 0.0f ||
-    target.confidence > 1.0f)
-  {
-    return arm_side + ": confidence out of [0, 1]";
-  }
-  if (target.confidence < min_confidence_) {
-    return arm_side + ": confidence below min_confidence";
-  }
-  return std::nullopt;
+  return arm_side + ": " + error;
 }
 
 bool DualHarvestExecutor::joint_states_ready(
@@ -461,7 +472,9 @@ bool DualHarvestExecutor::run_stage_dispatch(
     last_right_error_.clear();
   }
 
-  dispatcher_->dispatch(left_plan.trajectory, right_plan.trajectory, sync_start_delay_sec_);
+  dispatcher_->dispatch(
+    left_plan.trajectory, right_plan.trajectory, sync_start_delay_sec_, left_enabled,
+    right_enabled);
   const rclcpp::Time shared_start =
     now() + rclcpp::Duration::from_seconds(sync_start_delay_sec_);
   RCLCPP_INFO(
@@ -523,8 +536,16 @@ void DualHarvestExecutor::publish_stage_feedback(
   const std::string & right_stage,
   float left_progress,
   float right_progress,
-  const std::string & message) const
+  const std::string & message)
 {
+  {
+    std::lock_guard<std::mutex> lock(feedback_state_mutex_);
+    feedback_left_stage_ = left_stage;
+    feedback_right_stage_ = right_stage;
+    feedback_left_progress_ = left_progress;
+    feedback_right_progress_ = right_progress;
+    feedback_message_ = message;
+  }
   if (!goal_handle || !goal_handle->is_active()) {
     return;
   }
@@ -534,7 +555,33 @@ void DualHarvestExecutor::publish_stage_feedback(
   feedback.left_progress = left_progress;
   feedback.right_progress = right_progress;
   feedback.message = message;
-  goal_handle->publish_feedback(std::make_shared<ExecuteDualHarvest::Feedback>(feedback));
+  try {
+    goal_handle->publish_feedback(std::make_shared<ExecuteDualHarvest::Feedback>(feedback));
+  } catch (const std::exception & ex) {
+    RCLCPP_WARN(get_logger(), "publish_feedback failed: %s", ex.what());
+  }
+}
+
+void DualHarvestExecutor::feedback_timer_tick()
+{
+  std::shared_ptr<GoalHandleHarvest> goal_handle;
+  ExecuteDualHarvest::Feedback feedback;
+  {
+    std::lock_guard<std::mutex> lock(feedback_state_mutex_);
+    goal_handle = active_goal_;
+    feedback.left_stage = feedback_left_stage_;
+    feedback.right_stage = feedback_right_stage_;
+    feedback.left_progress = feedback_left_progress_;
+    feedback.right_progress = feedback_right_progress_;
+    feedback.message = feedback_message_;
+  }
+  if (goal_handle && goal_handle->is_active()) {
+    try {
+      goal_handle->publish_feedback(std::make_shared<ExecuteDualHarvest::Feedback>(feedback));
+    } catch (const std::exception & ex) {
+      RCLCPP_WARN(get_logger(), "periodic publish_feedback failed: %s", ex.what());
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -558,15 +605,26 @@ void DualHarvestExecutor::execute(const std::shared_ptr<GoalHandleHarvest> goal_
     TargetLedger & ledger;
     const std::string & left_id;
     const std::string & right_id;
+    std::mutex & feedback_mutex;
+    std::shared_ptr<GoalHandleHarvest> & active_goal;
     ~ExitGuard()
     {
       ledger.release(left_id);
       ledger.release(right_id);
+      {
+        std::lock_guard<std::mutex> fb_lock(feedback_mutex);
+        active_goal.reset();
+      }
       std::lock_guard<std::mutex> lock(gate);
       busy = false;
     }
   } guard{goal_gate_mutex_, busy_, target_ledger_,
-    goal->left_target.target_id, goal->right_target.target_id};
+    goal->left_target.target_id, goal->right_target.target_id,
+    feedback_state_mutex_, active_goal_};
+  {
+    std::lock_guard<std::mutex> lock(feedback_state_mutex_);
+    active_goal_ = goal_handle;
+  }
 
   auto fail = [&](const std::string & stage, const std::string & message) {
       result->success = false;
@@ -574,7 +632,13 @@ void DualHarvestExecutor::execute(const std::shared_ptr<GoalHandleHarvest> goal_
       result->right_success = false;
       result->failed_stage = stage;
       result->message = message;
-      goal_handle->abort(result);
+      try {
+        goal_handle->abort(result);
+      } catch (const std::exception & ex) {
+        RCLCPP_ERROR(
+          get_logger(), "[task=%s] abort() transition failed: %s", task_id.c_str(),
+          ex.what());
+      }
       RCLCPP_ERROR(
         get_logger(), "[task=%s][%s] FAILED: %s", task_id.c_str(), stage.c_str(),
         message.c_str());
@@ -585,7 +649,35 @@ void DualHarvestExecutor::execute(const std::shared_ptr<GoalHandleHarvest> goal_
       result->right_success = false;
       result->failed_stage = stage;
       result->message = "canceled by client at stage " + stage;
-      goal_handle->canceled(result);
+      // The server thread applies its own CANCELING transition right after
+      // this task's on_cancel callback returns, which can race with this
+      // coordinator waking up. Retry briefly so the contract stays CANCELED,
+      // then fall back to abort() instead of ever killing the process.
+      bool transitioned = false;
+      for (int attempt = 0; attempt < 20 && !transitioned; ++attempt) {
+        try {
+          goal_handle->canceled(result);
+          transitioned = true;
+        } catch (const std::exception & ex) {
+          if (attempt == 0) {
+            RCLCPP_WARN(
+              get_logger(), "[task=%s] canceled() raced the server transition (%s); retrying",
+              task_id.c_str(), ex.what());
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+      }
+      if (!transitioned) {
+        RCLCPP_WARN(
+          get_logger(), "[task=%s] canceled() never became valid; aborting instead",
+          task_id.c_str());
+        try {
+          goal_handle->abort(result);
+        } catch (const std::exception & inner) {
+          RCLCPP_ERROR(get_logger(), "[task=%s] abort() fallback failed: %s",
+            task_id.c_str(), inner.what());
+        }
+      }
       RCLCPP_WARN(
         get_logger(), "[task=%s][%s] CANCELED", task_id.c_str(), stage.c_str());
     };
@@ -595,7 +687,13 @@ void DualHarvestExecutor::execute(const std::shared_ptr<GoalHandleHarvest> goal_
       result->right_success = right_enabled;
       result->failed_stage = "";
       result->message = message;
-      goal_handle->succeed(result);
+      try {
+        goal_handle->succeed(result);
+      } catch (const std::exception & ex) {
+        RCLCPP_ERROR(
+          get_logger(), "[task=%s] succeed() transition failed: %s", task_id.c_str(),
+          ex.what());
+      }
       RCLCPP_INFO(get_logger(), "[task=%s] SUCCEEDED: %s", task_id.c_str(), message.c_str());
     };
 
@@ -698,6 +796,7 @@ void DualHarvestExecutor::execute(const std::shared_ptr<GoalHandleHarvest> goal_
     }
 
     const std::string stage_str = stage_name(stage);
+    const auto stage_start = std::chrono::steady_clock::now();
     publish_stage_feedback(
       goal_handle, left_enabled ? stage_str : "", right_enabled ? stage_str : "",
       left_progress, right_progress, "planning " + stage_str);
@@ -764,9 +863,11 @@ void DualHarvestExecutor::execute(const std::shared_ptr<GoalHandleHarvest> goal_
       right_plan.trajectory.points.size());
 
     if (plan_only_) {
+      const double plan_seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - stage_start).count();
       RCLCPP_INFO(
-        get_logger(), "[task=%s][%s] plan_only: dispatch skipped", task_id.c_str(),
-        stage_str.c_str());
+        get_logger(), "[task=%s][%s] plan_only: dispatch skipped, planning took %.2fs",
+        task_id.c_str(), stage_str.c_str(), plan_seconds);
       completed_motion += 1;
       left_progress =
         left_enabled ? static_cast<float>(completed_motion) / kMotionStageCount : 0.0f;
@@ -800,10 +901,13 @@ void DualHarvestExecutor::execute(const std::shared_ptr<GoalHandleHarvest> goal_
     publish_stage_feedback(
       goal_handle, left_enabled ? stage_str : "", right_enabled ? stage_str : "",
       left_progress, right_progress, stage_str + " completed");
+    const double stage_seconds =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - stage_start).count();
     RCLCPP_INFO(
-      get_logger(), "[task=%s][%s] completed: left=%s right=%s",
+      get_logger(), "[task=%s][%s] completed: left=%s right=%s duration=%.2fs",
       task_id.c_str(), stage_str.c_str(),
-      left_enabled ? "SUCCESS" : "skipped", right_enabled ? "SUCCESS" : "skipped");
+      left_enabled ? "SUCCESS" : "skipped", right_enabled ? "SUCCESS" : "skipped",
+      stage_seconds);
   }
 
   publish_stage_feedback(

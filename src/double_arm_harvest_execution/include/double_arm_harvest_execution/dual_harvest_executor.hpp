@@ -151,7 +151,10 @@ private:
     const std::string & right_stage,
     float left_progress,
     float right_progress,
-    const std::string & message) const;
+    const std::string & message);
+
+  /// Republish the stored feedback state at 2 Hz while a task is active.
+  void feedback_timer_tick();
 
   // ---- parameters ----
   std::string base_frame_;
@@ -211,6 +214,16 @@ private:
   mutable std::mutex joint_state_mutex_;
   sensor_msgs::msg::JointState latest_joint_state_;
   double last_joint_state_recv_sec_{0.0};
+
+  // ---- live feedback state ----
+  rclcpp::TimerBase::SharedPtr feedback_timer_;
+  mutable std::mutex feedback_state_mutex_;
+  std::shared_ptr<GoalHandleHarvest> active_goal_;
+  std::string feedback_left_stage_;
+  std::string feedback_right_stage_;
+  float feedback_left_progress_{0.0f};
+  float feedback_right_progress_{0.0f};
+  std::string feedback_message_;
 };
 
 }  // namespace double_arm_harvest_execution

@@ -44,10 +44,12 @@ public:
   bool wait_for_servers(double timeout_sec) const;
 
   /// Stamp both trajectories with one shared start time (now + delay) and
-  /// send both goals nearly simultaneously. Overwrites any header stamp.
+  /// send goals for the enabled arms. Overwrites any header stamp. Disabled
+  /// arms are never given a goal.
   void dispatch(
     trajectory_msgs::msg::JointTrajectory & left,
-    trajectory_msgs::msg::JointTrajectory & right, double sync_delay_sec);
+    trajectory_msgs::msg::JointTrajectory & right, double sync_delay_sec,
+    bool send_left = true, bool send_right = true);
 
   /// Cancel one side's active goal, if any. Safe to call repeatedly.
   void cancel(bool left);
