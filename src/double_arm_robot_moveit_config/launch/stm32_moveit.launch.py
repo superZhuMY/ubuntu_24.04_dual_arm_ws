@@ -30,7 +30,8 @@ from moveit_configs_utils import MoveItConfigsBuilder
 
 def generate_launch_description():
     args = {
-        "hardware_mode": ("real", ["real"]),
+        # fake is only used by harvest_fake.launch.py (mock hardware, no serial)
+        "hardware_mode": ("real", ["real", "fake"]),
         "stm32_device": ("/dev/serial/by-id/usb-AIMotor_F407", None),
         "stm32_baud_rate": ("115200", None),
         "stm32_target_ack_timeout_ms": ("200", None),
@@ -47,6 +48,9 @@ def generate_launch_description():
         "stm32_read_only": ("false", ["true", "false"]),
         "allow_motor_enable": ("true", ["true", "false"]),
         "start_rviz": ("true", ["true", "false"]),
+        # Calibration/sparse default stays false; harvest_stm32.launch.py
+        # includes this launch with true to dispatch both arms together.
+        "allow_simultaneous_arms": ("false", ["true", "false"]),
         # sparse: hybrid J1-J3 sparse targets + J4-J6 progress streaming.
         # continuous: legacy JointTrajectoryController path for comparison.
         "execution_mode": ("streaming", ["streaming", "sparse", "continuous"]),
@@ -180,7 +184,8 @@ def generate_launch_description():
         executable="sparse_trajectory_executor",
         name="sparse_trajectory_executor",
         output="screen",
-        parameters=[sparse_execution_file],
+        parameters=[sparse_execution_file, {"allow_simultaneous_arms": ParameterValue(
+            lcs["allow_simultaneous_arms"], value_type=bool)}],
         condition=sparse_condition,
     ))
     nodes.append(Node(
@@ -188,7 +193,8 @@ def generate_launch_description():
         executable="streaming_trajectory_executor",
         name="streaming_trajectory_executor",
         output="screen",
-        parameters=[sparse_execution_file],
+        parameters=[sparse_execution_file, {"allow_simultaneous_arms": ParameterValue(
+            lcs["allow_simultaneous_arms"], value_type=bool)}],
         condition=streaming_condition,
     ))
     nodes.append(Node(

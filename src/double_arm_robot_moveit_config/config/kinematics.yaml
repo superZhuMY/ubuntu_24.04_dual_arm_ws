@@ -1,8 +1,13 @@
+# IK solver settings. The default 5 ms solver timeout from the setup
+# assistant is too tight for this 3P+3R chain (prismatic XYZ + Y-Z-Y wrist):
+# goal sampling for pose targets repeatedly failed with NO_IK_SOLUTION.
+# 0.05 s gives the KDL search room for its random restarts; verified on the
+# /compute_ik round-trip during harvest H2 bring-up.
 L_arm:
   kinematics_solver: kdl_kinematics_plugin/KDLKinematicsPlugin
   kinematics_solver_search_resolution: 0.005
-  kinematics_solver_timeout: 0.005
+  kinematics_solver_timeout: 0.05
 R_arm:
   kinematics_solver: kdl_kinematics_plugin/KDLKinematicsPlugin
   kinematics_solver_search_resolution: 0.005
-  kinematics_solver_timeout: 0.005
+  kinematics_solver_timeout: 0.05
