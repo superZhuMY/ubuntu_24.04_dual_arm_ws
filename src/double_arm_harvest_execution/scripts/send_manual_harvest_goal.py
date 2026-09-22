@@ -144,7 +144,7 @@ class ManualHarvestSender(Node):
         send_future = self._client.send_goal_async(
             self._goal, feedback_callback=lambda msg: self._print_feedback(msg.feedback)
         )
-        rclpy.spin_until_future_complete(self, send_future, self._timeout_sec)
+        rclpy.spin_until_future_complete(self, send_future, timeout_sec=self._timeout_sec)
         if not send_future.done():
             self.get_logger().error("Timed out waiting for goal acceptance")
             return 2
@@ -154,7 +154,7 @@ class ManualHarvestSender(Node):
             return 1
 
         result_future = goal_handle.get_result_async()
-        rclpy.spin_until_future_complete(self, result_future, self._timeout_sec)
+        rclpy.spin_until_future_complete(self, result_future, timeout_sec=self._timeout_sec)
         if not result_future.done():
             self.get_logger().error("Timed out waiting for the task result")
             return 2

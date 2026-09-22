@@ -1,21 +1,26 @@
 # Manual harvest targets for send_manual_harvest_goal.py.
 #
-# WARNING: these coordinates are samples for interface and fake-mode
-# validation only. They are NOT calibrated for the real robot and must never
-# be sent to real hardware. Replace both arms with measured, safe targets
-# before any STM32 run.
+# These coordinates are the forward kinematics of an interior, non-singular
+# joint configuration of each arm (verified 30/30 on /compute_ik with random
+# seeds during harvest H2 bring-up). The HOME pose itself is a poor pose-goal
+# target on this robot: its Y-Z-Y wrist sits on the theta5=0 singularity and
+# J3 rests 0.01 above its lower limit, so IK goal sampling fails.
+#
+# They are NOT calibrated harvest points and must never be sent to real
+# hardware as-is. Replace both arms with measured, safe targets before any
+# STM32 run.
 left:
   target_id: left_test_001
   frame_id: base_link
-  position: [0.30, 0.20, 0.40]
-  orientation: [0.0, 0.0, 0.0, 1.0]
+  position: [0.2155, 0.4281, 0.0180]
+  orientation: [-0.1099, 0.2941, -0.2761, 0.9084]
   confidence: 1.0
   source: manual_yaml
 
 right:
   target_id: right_test_001
   frame_id: base_link
-  position: [0.30, -0.20, 0.40]
-  orientation: [0.0, 0.0, 0.0, 1.0]
+  position: [0.5689, 0.4297, 0.0225]
+  orientation: [-0.2074, 0.3708, 0.1589, 0.8912]
   confidence: 1.0
   source: manual_yaml

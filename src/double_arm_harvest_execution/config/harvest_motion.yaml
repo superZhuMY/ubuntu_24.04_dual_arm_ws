@@ -32,14 +32,17 @@ dual_arm_harvest_executor:
     cancel_timeout_sec: 3.0
 
     # Tool-frame offsets, rotated by the target orientation before being added
-    # to the target position. Keep magnitudes small for the first hardware run.
-    left_approach_offset_tool: [0.0, 0.0, -0.08]
+    # to the target position. The prismatic Z budget (L/R_Joint_2 limit is
+    # +0.05 m at the nominal pose) caps how far the approach/retreat can dip
+    # below a nominal target, so the first round uses small offsets; revisit
+    # after single-arm hardware tests.
+    left_approach_offset_tool: [0.0, 0.0, -0.03]
     left_pick_offset_tool: [0.0, 0.0, 0.0]
-    left_retreat_offset_tool: [0.0, 0.0, -0.10]
+    left_retreat_offset_tool: [0.0, 0.0, -0.04]
 
-    right_approach_offset_tool: [0.0, 0.0, -0.08]
+    right_approach_offset_tool: [0.0, 0.0, -0.03]
     right_pick_offset_tool: [0.0, 0.0, 0.0]
-    right_retreat_offset_tool: [0.0, 0.0, -0.10]
+    right_retreat_offset_tool: [0.0, 0.0, -0.04]
 
     # Reserved stages; skipped (logged) until the end effector and the place
     # point are commissioned.
