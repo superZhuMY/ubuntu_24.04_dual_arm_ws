@@ -47,7 +47,8 @@ dual_arm_harvest_executor:
     # END_EFFECTOR closes both enabled grippers through one dual-gripper
     # action. Position is normalized: 0.0=open, 1.0=closed. The gripper node
     # maps it to the independently calibrated left/right pulse values.
-    end_effector_enabled: false
+    # end_effector_enabled is passed by the launches (see note below); it must
+    # not be set in this exact-node-name file or launch overrides lose.
     gripper_action_name: /dual_gripper/command
     gripper_open_position: 0.0
     gripper_close_position: 1.0
@@ -57,9 +58,15 @@ dual_arm_harvest_executor:
     # PLACE/RELEASE remain reserved until a placement target is defined.
     place_enabled: false
 
-    # dry_run:   validate targets and walk the state machine without planning
-    #            or dispatching anything.
-    # plan_only: run real MoveIt planning for every stage but never dispatch a
-    #            controller goal. Neither mode moves the arms.
-    dry_run: false
-    plan_only: false
+    # dry_run / plan_only / end_effector_enabled are NOT set here on purpose:
+    # an exact-node-name rule in this file would beat the `/**` overrides that
+    # harvest_fake.launch.py passes (rcl precedence: exact beats wildcard
+    # regardless of file order), so a `false` here could never be overridden
+    # from the launch command line. The node defaults them to false and the
+    # launches pass explicit values:
+    #   dry_run:   validate targets and walk the state machine without
+    #              planning or dispatching anything.
+    #   plan_only: run real MoveIt planning for every stage but never dispatch
+    #              a controller goal. Neither mode moves the arms.
+    #   end_effector_enabled: gripper stages run (harvest_fake uses the mock
+    #              controller; harvest_stm32 passes start_grippers).
