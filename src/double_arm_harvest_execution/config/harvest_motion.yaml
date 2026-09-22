@@ -1,0 +1,54 @@
+# Harvest motion parameters for dual_arm_harvest_executor.
+#
+# First-round conservative defaults: slow velocities, short offsets, generous
+# timeouts. Real offsets and speeds must be confirmed by single-arm, small
+# displacement tests before any dual-arm run (see H5 bring-up procedure).
+dual_arm_harvest_executor:
+  ros__parameters:
+    base_frame: base_link
+    left_group: L_arm
+    right_group: R_arm
+    left_home_name: L_home
+    right_home_name: R_home
+
+    # Reject targets below this confidence (manual YAML usually sends 1.0).
+    min_confidence: 0.50
+    # joint_states must be fresher than this before every planning stage.
+    joint_state_timeout_sec: 1.0
+
+    planning_time_sec: 3.0
+    planning_attempts: 5
+    velocity_scale: 0.10
+    acceleration_scale: 0.10
+
+    # Both trajectories get header.stamp = now + this delay, so the streaming
+    # executor starts the two arms at the same scheduled instant.
+    sync_start_delay_sec: 0.50
+    # Time budget for both FollowJointTrajectory goals being accepted.
+    goal_accept_timeout_sec: 3.0
+    # Hard deadline for one dual-arm stage (planning is extra, before dispatch).
+    stage_timeout_sec: 30.0
+    # Time budget for the peer arm to acknowledge cancellation.
+    cancel_timeout_sec: 3.0
+
+    # Tool-frame offsets, rotated by the target orientation before being added
+    # to the target position. Keep magnitudes small for the first hardware run.
+    left_approach_offset_tool: [0.0, 0.0, -0.08]
+    left_pick_offset_tool: [0.0, 0.0, 0.0]
+    left_retreat_offset_tool: [0.0, 0.0, -0.10]
+
+    right_approach_offset_tool: [0.0, 0.0, -0.08]
+    right_pick_offset_tool: [0.0, 0.0, 0.0]
+    right_retreat_offset_tool: [0.0, 0.0, -0.10]
+
+    # Reserved stages; skipped (logged) until the end effector and the place
+    # point are commissioned.
+    end_effector_enabled: false
+    place_enabled: false
+
+    # dry_run:   validate targets and walk the state machine without planning
+    #            or dispatching anything.
+    # plan_only: run real MoveIt planning for every stage but never dispatch a
+    #            controller goal. Neither mode moves the arms.
+    dry_run: false
+    plan_only: false

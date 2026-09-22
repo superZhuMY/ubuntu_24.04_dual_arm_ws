@@ -1,0 +1,21 @@
+# Manual harvest targets for send_manual_harvest_goal.py.
+#
+# WARNING: these coordinates are samples for interface and fake-mode
+# validation only. They are NOT calibrated for the real robot and must never
+# be sent to real hardware. Replace both arms with measured, safe targets
+# before any STM32 run.
+left:
+  target_id: left_test_001
+  frame_id: base_link
+  position: [0.30, 0.20, 0.40]
+  orientation: [0.0, 0.0, 0.0, 1.0]
+  confidence: 1.0
+  source: manual_yaml
+
+right:
+  target_id: right_test_001
+  frame_id: base_link
+  position: [0.30, -0.20, 0.40]
+  orientation: [0.0, 0.0, 0.0, 1.0]
+  confidence: 1.0
+  source: manual_yaml
