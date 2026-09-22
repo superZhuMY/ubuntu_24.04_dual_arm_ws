@@ -21,6 +21,8 @@ setup(
     license="BSD-3-Clause",
     entry_points={
         "console_scripts": [
+            "streaming_trajectory_executor = "
+            "double_arm_sparse_execution.streaming_trajectory_executor:main",
             "sparse_trajectory_executor = "
             "double_arm_sparse_execution.sparse_trajectory_executor:main",
         ],
