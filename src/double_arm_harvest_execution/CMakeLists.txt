@@ -80,6 +80,9 @@ if(BUILD_TESTING)
   ament_add_gtest(test_failure_policy test/test_failure_policy.cpp)
   target_include_directories(test_failure_policy PRIVATE include)
   target_link_libraries(test_failure_policy harvest_core)
+
+  find_package(launch_testing_ament_cmake REQUIRED)
+  add_launch_test(test/test_fake_harvest_integration.py TIMEOUT "600")
 endif()
 
 ament_package()
