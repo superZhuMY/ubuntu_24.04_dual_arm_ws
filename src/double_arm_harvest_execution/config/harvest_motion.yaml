@@ -32,10 +32,7 @@ dual_arm_harvest_executor:
     cancel_timeout_sec: 3.0
 
     # Tool-frame offsets, rotated by the target orientation before being added
-    # to the target position. The prismatic Z budget (L/R_Joint_2 limit is
-    # +0.05 m at the nominal pose) caps how far the approach/retreat can dip
-    # below a nominal target, so the first round uses small offsets; revisit
-    # after single-arm hardware tests.
+    # to the target position. Only used when j3_extend_mode is false.
     left_approach_offset_tool: [0.0, 0.0, -0.03]
     left_pick_offset_tool: [0.0, 0.0, 0.0]
     left_retreat_offset_tool: [0.0, 0.0, -0.04]
@@ -43,6 +40,17 @@ dual_arm_harvest_executor:
     right_approach_offset_tool: [0.0, 0.0, -0.03]
     right_pick_offset_tool: [0.0, 0.0, 0.0]
     right_retreat_offset_tool: [0.0, 0.0, -0.04]
+
+    # --- J3 直线伸出模式（当前作业流程） ---
+    # 流程：接近点 = 果实点 - d*J3轴(基座系固定方向) -> APPROACH 用 OMPL 自由路径；
+    # PICK/RETREAT 用笛卡尔直线路径沿 J3 轴伸出/缩回（腕部四轴保持不动），
+    # 然后闭合夹爪、回 Home。target YAML 里的 position = 爪子闭合时 TCP 应到的点。
+    j3_extend_mode: true
+    j3_extend_distance: 0.05          # 伸出距离（米），首跑保守值
+    left_j3_extend_axis: [0.2588, 0.9077, -0.3304]   # URDF 常量，勿改
+    right_j3_extend_axis: [-0.2588, 0.9077, -0.3304] # URDF 常量，勿改
+    cartesian_eef_step: 0.005         # 笛卡尔路径插值步长（米）
+    cartesian_min_fraction: 0.95      # 笛卡尔路径最低完成比例
 
     # END_EFFECTOR closes both enabled grippers through one dual-gripper
     # action. Position is normalized: 0.0=open, 1.0=closed. The gripper node

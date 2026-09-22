@@ -12,15 +12,15 @@
 left:
   target_id: left_test_001
   frame_id: base_link
-  position: [0.2155, 0.4281, 0.0180]
-  orientation: [-0.1099, 0.2941, -0.2761, 0.9084]
+  position: [0.21121, 0.36921, 0.24467]
+  orientation: [-0.1605, -0.066333, -0.37595, 0.91022]
   confidence: 1.0
   source: manual_yaml
 
 right:
   target_id: right_test_001
   frame_id: base_link
-  position: [0.5689, 0.4297, 0.0225]
-  orientation: [-0.2074, 0.3708, 0.1589, 0.8912]
+  position: [0.5596, 0.3982, 0.16378]
+  orientation: [-0.1559, 0.076456, 0.43349, 0.88427]
   confidence: 1.0
   source: manual_yaml

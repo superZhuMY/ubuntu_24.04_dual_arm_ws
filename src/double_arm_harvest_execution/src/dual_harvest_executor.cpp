@@ -122,6 +122,13 @@ DualHarvestExecutor::DualHarvestExecutor(const rclcpp::NodeOptions & options)
   gripper_close_position_ = get_or_declare<double>("gripper_close_position", 1.0);
   gripper_duration_ms_ = get_or_declare<int64_t>("gripper_duration_ms", 800);
   gripper_action_timeout_sec_ = get_or_declare<double>("gripper_action_timeout_sec", 8.0);
+
+  j3_extend_mode_ = get_or_declare<bool>("j3_extend_mode", true);
+  j3_extend_distance_ = get_or_declare<double>("j3_extend_distance", 0.05);
+  left_j3_extend_axis_ = get_offset_param("left_j3_extend_axis");
+  right_j3_extend_axis_ = get_offset_param("right_j3_extend_axis");
+  cartesian_eef_step_ = get_or_declare<double>("cartesian_eef_step", 0.005);
+  cartesian_min_fraction_ = get_or_declare<double>("cartesian_min_fraction", 0.95);
   place_enabled_ = get_or_declare<bool>("place_enabled", false);
   dry_run_ = get_or_declare<bool>("dry_run", false);
   plan_only_ = get_or_declare<bool>("plan_only", false);
@@ -145,6 +152,18 @@ DualHarvestExecutor::DualHarvestExecutor(const rclcpp::NodeOptions & options)
     gripper_action_timeout_sec_ <= 0.0)
   {
     throw std::runtime_error("gripper position, duration, or timeout is invalid");
+  }
+  if (j3_extend_distance_ <= 0.0 || cartesian_eef_step_ <= 0.0 ||
+    cartesian_min_fraction_ <= 0.0 || cartesian_min_fraction_ > 1.0)
+  {
+    throw std::runtime_error("j3_extend_distance / cartesian parameters are invalid");
+  }
+  for (const auto & axis : {left_j3_extend_axis_, right_j3_extend_axis_}) {
+    const double norm = std::sqrt(
+      axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]);
+    if (std::abs(norm - 1.0) > 0.01) {
+      throw std::runtime_error("j3 extend axis must be a unit vector");
+    }
   }
 
   server_cb_group_ = create_callback_group(rclcpp::CallbackGroupType::Reentrant);
@@ -449,6 +468,19 @@ geometry_msgs::msg::PoseStamped DualHarvestExecutor::stage_target_pose(
   return out;
 }
 
+geometry_msgs::msg::PoseStamped DualHarvestExecutor::stage_target_pose_base(
+  const double_arm_harvest_interfaces::msg::HarvestTarget & target,
+  const std::array<double, 3> & base_offset) const
+{
+  geometry_msgs::msg::PoseStamped out;
+  out.header = target.target_pose.header;
+  out.pose = target.target_pose.pose;
+  out.pose.position.x += base_offset[0];
+  out.pose.position.y += base_offset[1];
+  out.pose.position.z += base_offset[2];
+  return out;
+}
+
 ArmStagePlan DualHarvestExecutor::plan_arm_pose(
   moveit::planning_interface::MoveGroupInterface & arm,
   const geometry_msgs::msg::PoseStamped & target_base_frame)
@@ -488,8 +520,7 @@ ArmStagePlan DualHarvestExecutor::plan_arm_pose(
 
 ArmStagePlan DualHarvestExecutor::plan_arm_named(
   moveit::planning_interface::MoveGroupInterface & arm, const std::string & named_target)
-{
-  ArmStagePlan out;
+{  ArmStagePlan out;
   arm.setStartStateToCurrentState();
   if (!arm.setNamedTarget(named_target)) {
     out.error = "unknown named target '" + named_target + "'";
@@ -508,6 +539,45 @@ ArmStagePlan DualHarvestExecutor::plan_arm_named(
     return out;
   }
   out.trajectory = plan.trajectory.joint_trajectory;
+  out.success = true;
+  return out;
+}
+
+ArmStagePlan DualHarvestExecutor::plan_arm_cartesian(
+  moveit::planning_interface::MoveGroupInterface & arm,
+  const geometry_msgs::msg::PoseStamped & target_base_frame)
+{
+  ArmStagePlan out;
+  geometry_msgs::msg::PoseStamped target_planning_frame;
+  try {
+    target_planning_frame =
+      tf_buffer_->transform(target_base_frame, planning_frame_, tf2::durationFromSec(1.0));
+  } catch (const tf2::TransformException & ex) {
+    out.error = std::string("TF transform to planning frame failed: ") + ex.what();
+    return out;
+  }
+
+  arm.setStartStateToCurrentState();
+  arm.setMaxVelocityScalingFactor(velocity_scale_);
+  arm.setMaxAccelerationScalingFactor(acceleration_scale_);
+
+  // Straight TCP line from the CURRENT state to the target; for a translation
+  // along the fixed J3 axis with a frozen orientation only the prismatic
+  // joints move, which is exactly the "J3 直线伸出/缩回" stroke.
+  std::vector<geometry_msgs::msg::Pose> waypoints;
+  waypoints.push_back(target_planning_frame.pose);
+  moveit_msgs::msg::RobotTrajectory trajectory;
+  const double fraction = arm.computeCartesianPath(
+    waypoints, cartesian_eef_step_, /*jump_threshold=*/0.0, trajectory,
+    /*avoid_collisions=*/true);
+  if (fraction < cartesian_min_fraction_) {
+    out.error = "Cartesian path covers only " +
+                std::to_string(static_cast<int>(fraction * 100.0)) +
+                "% of the line (min " +
+                std::to_string(static_cast<int>(cartesian_min_fraction_ * 100.0)) + "%)";
+    return out;
+  }
+  out.trajectory = trajectory.joint_trajectory;
   out.success = true;
   return out;
 }
@@ -921,17 +991,47 @@ void DualHarvestExecutor::execute(const std::shared_ptr<GoalHandleHarvest> goal_
       return;
     }
 
+    // One planner per arm; the stage decides the target and the planner type.
+    auto plan_stage_for = [&](
+      Stage st, moveit::planning_interface::MoveGroupInterface & arm,
+      const double_arm_harvest_interfaces::msg::HarvestTarget & target,
+      const std::array<double, 3> & j3_axis,
+      const std::array<double, 3> & approach_off,
+      const std::array<double, 3> & pick_off,
+      const std::array<double, 3> & retreat_off,
+      const std::string & home_name) -> ArmStagePlan {
+      if (st == Stage::HOME) {
+        return plan_arm_named(arm, home_name);
+      }
+      if (j3_extend_mode_) {
+        // 接近点 = 果实点 - d*J3轴；PICK/RETREAT = 沿 J3 轴的笛卡尔直线。
+        const std::array<double, 3> back = {
+          -j3_extend_distance_ * j3_axis[0],
+          -j3_extend_distance_ * j3_axis[1],
+          -j3_extend_distance_ * j3_axis[2]};
+        if (st == Stage::APPROACH) {
+          return plan_arm_pose(arm, stage_target_pose_base(target, back));
+        }
+        if (st == Stage::PICK) {
+          return plan_arm_cartesian(
+            arm, stage_target_pose_base(target, {0.0, 0.0, 0.0}));
+        }
+        return plan_arm_cartesian(arm, stage_target_pose_base(target, back));
+      }
+      return plan_arm_pose(
+        arm, stage_target_pose(
+               target,
+               st == Stage::APPROACH ? approach_off :
+               st == Stage::PICK ? pick_off : retreat_off));
+    };
+
     ArmStagePlan left_plan;
     ArmStagePlan right_plan;
     if (left_enabled) {
-      left_plan = (stage == Stage::HOME) ?
-        plan_arm_named(*left_arm_, left_home_name_) :
-        plan_arm_pose(
-        *left_arm_,
-        stage_target_pose(
-          goal->left_target,
-          stage == Stage::APPROACH ? left_approach_offset_ :
-          stage == Stage::PICK ? left_pick_offset_ : left_retreat_offset_));
+      left_plan = plan_stage_for(
+        stage, *left_arm_, goal->left_target, left_j3_extend_axis_,
+        left_approach_offset_, left_pick_offset_, left_retreat_offset_,
+        left_home_name_);
       if (!left_plan.success) {
         RCLCPP_ERROR(
           get_logger(), "[task=%s][%s] left plan failed: %s", task_id.c_str(),
@@ -939,14 +1039,10 @@ void DualHarvestExecutor::execute(const std::shared_ptr<GoalHandleHarvest> goal_
       }
     }
     if (right_enabled) {
-      right_plan = (stage == Stage::HOME) ?
-        plan_arm_named(*right_arm_, right_home_name_) :
-        plan_arm_pose(
-        *right_arm_,
-        stage_target_pose(
-          goal->right_target,
-          stage == Stage::APPROACH ? right_approach_offset_ :
-          stage == Stage::PICK ? right_pick_offset_ : right_retreat_offset_));
+      right_plan = plan_stage_for(
+        stage, *right_arm_, goal->right_target, right_j3_extend_axis_,
+        right_approach_offset_, right_pick_offset_, right_retreat_offset_,
+        right_home_name_);
       if (!right_plan.success) {
         RCLCPP_ERROR(
           get_logger(), "[task=%s][%s] right plan failed: %s", task_id.c_str(),

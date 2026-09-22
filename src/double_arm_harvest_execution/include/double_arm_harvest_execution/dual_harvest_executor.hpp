@@ -129,12 +129,26 @@ private:
     const double_arm_harvest_interfaces::msg::HarvestTarget & target,
     const std::array<double, 3> & tool_offset) const;
 
+  /// Generate the pose of one stage for one arm with a BASE-frame offset
+  /// (J3-extend mode: the offset follows the fixed prismatic axis instead of
+  /// the tool frame).
+  geometry_msgs::msg::PoseStamped stage_target_pose_base(
+    const double_arm_harvest_interfaces::msg::HarvestTarget & target,
+    const std::array<double, 3> & base_offset) const;
+
   ArmStagePlan plan_arm_pose(
     moveit::planning_interface::MoveGroupInterface & arm,
     const geometry_msgs::msg::PoseStamped & target_base_frame);
   ArmStagePlan plan_arm_named(
     moveit::planning_interface::MoveGroupInterface & arm,
     const std::string & named_target);
+
+  /// Straight-line Cartesian plan from the CURRENT robot state to the target
+  /// pose (J3 extend/retract strokes). Succeeds only when the computed path
+  /// covers at least cartesian_min_fraction of the line.
+  ArmStagePlan plan_arm_cartesian(
+    moveit::planning_interface::MoveGroupInterface & arm,
+    const geometry_msgs::msg::PoseStamped & target_base_frame);
 
   /// Dispatch both trajectories with one shared start time and wait until the
   /// stage barrier reaches a final verdict. Returns true when the stage may
@@ -192,6 +206,12 @@ private:
   double gripper_close_position_{1.0};
   int gripper_duration_ms_{800};
   double gripper_action_timeout_sec_{8.0};
+  bool j3_extend_mode_{true};
+  double j3_extend_distance_{0.05};
+  std::array<double, 3> left_j3_extend_axis_{};
+  std::array<double, 3> right_j3_extend_axis_{};
+  double cartesian_eef_step_{0.005};
+  double cartesian_min_fraction_{0.95};
   bool place_enabled_{false};
   bool dry_run_{false};
   bool plan_only_{false};
