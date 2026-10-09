@@ -21,7 +21,7 @@ from moveit_msgs.srv import GetStateValidity
 import rclpy
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
-from rclpy.executors import MultiThreadedExecutor
+from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.task import Future
@@ -103,7 +103,7 @@ class SparseTrajectoryExecutor(Node):
         self._busy_lock = threading.Lock()
         self._busy = {LEFT.name: False, RIGHT.name: False}
 
-        self._publishers = {
+        self._command_publishers = {
             spec.name: self.create_publisher(Float64MultiArray, spec.command_topic, 10)
             for spec in (LEFT, RIGHT)
         }
@@ -424,7 +424,7 @@ class SparseTrajectoryExecutor(Node):
 
         # The first hybrid command starts J1-J3 toward the sparse target while
         # holding J4-J6 at their measured segment-start positions.
-        self._publishers[spec.name].publish(Float64MultiArray(data=command))
+        self._command_publishers[spec.name].publish(Float64MultiArray(data=command))
         last_command = command
         last_wrist_update = time.monotonic()
         self.get_logger().info(
@@ -470,7 +470,7 @@ class SparseTrajectoryExecutor(Node):
                 ):
                     # J1-J3 stay exactly equal to target[:3] on every publish.
                     # The STM32 therefore updates only the MW wrist motors.
-                    self._publishers[spec.name].publish(
+                    self._command_publishers[spec.name].publish(
                         Float64MultiArray(data=next_command)
                     )
                     last_command = next_command
@@ -507,7 +507,7 @@ class SparseTrajectoryExecutor(Node):
     def _hold_current(self, spec: ArmSpec) -> None:
         actual = self._current_positions(spec)
         if actual is not None and self._state_is_fresh():
-            self._publishers[spec.name].publish(Float64MultiArray(data=actual))
+            self._command_publishers[spec.name].publish(Float64MultiArray(data=actual))
 
 
 def main(args=None) -> None:
@@ -517,12 +517,12 @@ def main(args=None) -> None:
     executor.add_node(node)
     try:
         executor.spin()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         executor.shutdown()
         node.destroy_node()
-        rclpy.shutdown()
+        rclpy.try_shutdown()
 
 
 if __name__ == "__main__":

@@ -33,7 +33,7 @@ def module_under_test():
     modules = {
         'control_msgs.action': S(FollowJointTrajectory=S(Result=result)),
         'rclpy': S(), 'rclpy.action': S(GoalResponse=S(REJECT=0)),
-        'rclpy.executors': S(MultiThreadedExecutor=object),
+        'rclpy.executors': S(MultiThreadedExecutor=object, ExternalShutdownException=RuntimeError),
         'std_msgs.msg': S(Float64MultiArray=lambda **kw:S(**kw)),
         PACKAGE+'.sparse_trajectory_executor': S(
             SparseTrajectoryExecutor=object, LEFT=SPEC, RIGHT=RIGHT_SPEC),
@@ -91,7 +91,7 @@ class LoopTest(unittest.TestCase):
         node._hold_current = lambda *a:events.append(('hold',clock.t))
         node._set_result = lambda result,code,message:S(error_code=code,error_string=message)
         commands = []
-        node._publishers = {'left':S(publish=lambda msg:commands.append((clock.t,list(msg.data))))}
+        node._command_publishers = {'left':S(publish=lambda msg:commands.append((clock.t,list(msg.data))))}
         ticks = S(count=0)
         def move(previous, target):
             return [a+max(-.01,min(.01,b-a)) for a,b in zip(previous,target)]
@@ -224,12 +224,7 @@ class GoalGateTest(unittest.TestCase):
 
     @staticmethod
     def destroy(node):
-        # Best effort: rclpy destroy_node can raise while tearing down
-        # duplicated publishers; the assertions above already passed.
-        try:
-            node.destroy_node()
-        except Exception:
-            pass
+        node.destroy_node()
 
     def test_busy_arm_rejects_new_goal_until_first_finishes(self):
         node = self.node_class()
@@ -261,3 +256,11 @@ class GoalGateTest(unittest.TestCase):
             self.assertFalse(any(node._busy.values()))
         finally:
             self.destroy(node)
+
+    def test_command_publishers_allow_node_cleanup(self):
+        node = self.node_class()
+        from std_msgs.msg import Float64MultiArray
+        # Creating a publisher after construction also exercises Node's registry.
+        node.create_publisher(Float64MultiArray, '/review/extra_commands', 10)
+        node.destroy_node()
+        self.assertEqual(list(node.publishers), [])

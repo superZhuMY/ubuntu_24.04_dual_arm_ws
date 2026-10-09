@@ -5,7 +5,7 @@ import time
 from control_msgs.action import FollowJointTrajectory
 import rclpy
 from rclpy.action import GoalResponse
-from rclpy.executors import MultiThreadedExecutor
+from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from std_msgs.msg import Float64MultiArray
 
 from .sparse_trajectory_executor import SparseTrajectoryExecutor, LEFT, RIGHT
@@ -98,7 +98,7 @@ class StreamingTrajectoryExecutor(SparseTrajectoryExecutor):
             for number, target in enumerate(targets, start=1):
                 if goal_handle.is_cancel_requested:
                     return self._cancel_stream(spec, goal_handle, result)
-                self._publishers[spec.name].publish(Float64MultiArray(data=list(target)))
+                self._command_publishers[spec.name].publish(Float64MultiArray(data=list(target)))
                 self.get_logger().info(
                     f"{spec.group}: AI segment target {number}/{len(targets)} published")
                 final = number == len(targets)
@@ -196,9 +196,9 @@ def main(args=None):
     executor.add_node(node)
     try:
         executor.spin()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         executor.shutdown()
         node.destroy_node()
-        rclpy.shutdown()
+        rclpy.try_shutdown()
