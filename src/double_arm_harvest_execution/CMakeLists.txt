@@ -77,12 +77,17 @@ if(BUILD_TESTING)
   target_link_libraries(test_sync_stamp harvest_core)
   ament_target_dependencies(test_sync_stamp rclcpp trajectory_msgs)
 
+  ament_add_gtest(test_trajectory_dispatcher test/test_trajectory_dispatcher.cpp)
+  target_include_directories(test_trajectory_dispatcher PRIVATE include)
+  target_link_libraries(test_trajectory_dispatcher harvest_core)
+
   ament_add_gtest(test_failure_policy test/test_failure_policy.cpp)
   target_include_directories(test_failure_policy PRIVATE include)
   target_link_libraries(test_failure_policy harvest_core)
 
   find_package(launch_testing_ament_cmake REQUIRED)
   add_launch_test(test/test_fake_harvest_integration.py TIMEOUT "600")
+  add_launch_test(test/test_fake_harvest_leaf_integration.py TIMEOUT "600")
 endif()
 
 ament_package()

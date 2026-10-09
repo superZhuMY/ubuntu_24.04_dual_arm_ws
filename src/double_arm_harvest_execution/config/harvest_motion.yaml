@@ -17,13 +17,18 @@ dual_arm_harvest_executor:
     joint_state_timeout_sec: 1.0
 
     planning_time_sec: 3.0
-    planning_attempts: 5
     velocity_scale: 0.10
     acceleration_scale: 0.10
 
     # Both trajectories get header.stamp = now + this delay, so the streaming
     # executor starts the two arms at the same scheduled instant.
     sync_start_delay_sec: 0.50
+    # tomato_pick: 现有双臂采摘（默认，行为不变）。
+    # leaf:        打叶采摘，仅错开 RETREAT——右臂先缩 J3，等
+    #              leaf_left_retreat_delay_sec 后左臂再缩，其余阶段与采摘相同。
+    task_mode: tomato_pick
+    leaf_left_retreat_delay_sec: 3.0
+    leaf_right_retreat_delay_sec: 0.0
     # Time budget for both FollowJointTrajectory goals being accepted.
     goal_accept_timeout_sec: 3.0
     # Hard deadline for one dual-arm stage (planning is extra, before dispatch).
@@ -31,50 +36,21 @@ dual_arm_harvest_executor:
     # Time budget for the peer arm to acknowledge cancellation.
     cancel_timeout_sec: 3.0
 
-    # Tool-frame offsets, rotated by the target orientation before being added
-    # to the target position. Only used when j3_extend_mode is false.
-    left_approach_offset_tool: [0.0, 0.0, -0.03]
-    left_pick_offset_tool: [0.0, 0.0, 0.0]
-    left_retreat_offset_tool: [0.0, 0.0, -0.04]
-
-    right_approach_offset_tool: [0.0, 0.0, -0.03]
-    right_pick_offset_tool: [0.0, 0.0, 0.0]
-    right_retreat_offset_tool: [0.0, 0.0, -0.04]
-
-    # --- J3 直线伸出模式（当前作业流程） ---
-    # 流程：接近点 = 果实点 - d*J3轴(基座系固定方向) -> APPROACH 用 OMPL 自由路径；
-    # PICK/RETREAT 用笛卡尔直线路径沿 J3 轴伸出/缩回（腕部四轴保持不动），
-    # 然后闭合夹爪、回 Home。target YAML 里的 position = 爪子闭合时 TCP 应到的点。
-    j3_extend_mode: true
-    j3_extend_distance: 0.05          # 伸出距离（米），首跑保守值
+    # Fixed manual workflow: one current-state-seeded IK for APPROACH, then
+    # change only J3 to extend/retract. The YAML point is the pick TCP pose.
+    j3_extend_distance: 0.07          # 伸出距离（米），首跑保守值
     left_j3_extend_axis: [0.2588, 0.9077, -0.3304]   # URDF 常量，勿改
     right_j3_extend_axis: [-0.2588, 0.9077, -0.3304] # URDF 常量，勿改
-    cartesian_eef_step: 0.005         # 笛卡尔路径插值步长（米）
-    cartesian_min_fraction: 0.95      # 笛卡尔路径最低完成比例
+    # J3 直线伸缩段中非 J3 关节允许的最大漂移（rad/m）。真机编码器噪声与
+    # 采样抖动远小于该值；超过才视为规划器绕路并中止任务。
+    j3_stroke_tolerance: 0.005
 
-    # END_EFFECTOR closes both enabled grippers through one dual-gripper
-    # action. Position is normalized: 0.0=open, 1.0=closed. The gripper node
-    # maps it to the independently calibrated left/right pulse values.
-    # end_effector_enabled is passed by the launches (see note below); it must
-    # not be set in this exact-node-name file or launch overrides lose.
+    # PREPARE_GRIPPER opens, END_EFFECTOR closes, and RELEASE_GRIPPER opens
+    # again only after HOME succeeds. Position is normalized: 0.0=open,
+    # 1.0=closed. The gripper node maps it to independently calibrated
+    # left/right Modbus register values.
     gripper_action_name: /dual_gripper/command
     gripper_open_position: 0.0
     gripper_close_position: 1.0
     gripper_duration_ms: 800
     gripper_action_timeout_sec: 8.0
-
-    # PLACE/RELEASE remain reserved until a placement target is defined.
-    place_enabled: false
-
-    # dry_run / plan_only / end_effector_enabled are NOT set here on purpose:
-    # an exact-node-name rule in this file would beat the `/**` overrides that
-    # harvest_fake.launch.py passes (rcl precedence: exact beats wildcard
-    # regardless of file order), so a `false` here could never be overridden
-    # from the launch command line. The node defaults them to false and the
-    # launches pass explicit values:
-    #   dry_run:   validate targets and walk the state machine without
-    #              planning or dispatching anything.
-    #   plan_only: run real MoveIt planning for every stage but never dispatch
-    #              a controller goal. Neither mode moves the arms.
-    #   end_effector_enabled: gripper stages run (harvest_fake uses the mock
-    #              controller; harvest_stm32 passes start_grippers).

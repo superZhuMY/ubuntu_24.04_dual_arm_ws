@@ -6,10 +6,14 @@ provides left/right targets so the execution layer can be exercised before a
 vision node exists. Every field is validated here; the script refuses to send
 anything on invalid input.
 
+With --loop the same target pair is re-sent forever (until Ctrl-C), pausing
+--loop-delay seconds between iterations. The executor releases the target id
+when a task ends, so the same target_id can be reused.
+
 Usage:
   ros2 run double_arm_harvest_execution send_manual_harvest_goal.py \
-      [--config PATH] [--no-left] [--no-right] [--plan-only] [--dry-run] \
-      [--timeout SEC]
+      [--config PATH] [--no-left] [--no-right] [--timeout SEC] \
+      [--loop] [--loop-delay SEC]
 
 Defaults read share/double_arm_harvest_execution/config/manual_targets.yaml.
 """
@@ -17,6 +21,7 @@ Defaults read share/double_arm_harvest_execution/config/manual_targets.yaml.
 import argparse
 import math
 import sys
+import time
 from pathlib import Path
 
 import rclpy
@@ -113,10 +118,12 @@ def build_goal_from_config(config, base_frame=DEFAULT_BASE_FRAME):
 
 
 class ManualHarvestSender(Node):
-    def __init__(self, goal, timeout_sec):
+    def __init__(self, goal, timeout_sec, loop=False, loop_delay_sec=3.0):
         super().__init__("send_manual_harvest_goal")
         self._goal = goal
         self._timeout_sec = timeout_sec
+        self._loop = loop
+        self._loop_delay_sec = loop_delay_sec
         self._client = ActionClient(self, ExecuteDualHarvest, ACTION_NAME)
         self._last_feedback_line = ""
 
@@ -131,6 +138,42 @@ class ManualHarvestSender(Node):
             self.get_logger().info(line)
             self._last_feedback_line = line
 
+    def _send_once(self):
+        """Send one goal and wait for its result.
+
+        Returns a tuple (exit_code, status): status is the GoalStatus of the
+        finished task, or None when acceptance/result never arrived.
+        """
+        self._last_feedback_line = ""
+        send_future = self._client.send_goal_async(
+            self._goal, feedback_callback=lambda msg: self._print_feedback(msg.feedback)
+        )
+        rclpy.spin_until_future_complete(self, send_future, timeout_sec=self._timeout_sec)
+        if not send_future.done():
+            self.get_logger().error("Timed out waiting for goal acceptance")
+            return 2, None
+        goal_handle = send_future.result()
+        if not goal_handle.accepted:
+            self.get_logger().error("Goal rejected by the harvest executor")
+            return 1, None
+
+        result_future = goal_handle.get_result_async()
+        rclpy.spin_until_future_complete(self, result_future, timeout_sec=self._timeout_sec)
+        if not result_future.done():
+            self.get_logger().error("Timed out waiting for the task result")
+            return 2, None
+
+        wrapped = result_future.result()
+        result = wrapped.result
+        if wrapped.status == 4:  # GoalStatus.STATUS_SUCCEEDED
+            self.get_logger().info(f"SUCCESS: {result.message}")
+            return 0, wrapped.status
+        self.get_logger().error(
+            f"FAILED (status={wrapped.status}): "
+            f"failed_stage={result.failed_stage!r} message={result.message!r}"
+        )
+        return 1, wrapped.status
+
     def run(self):
         if not self._client.wait_for_server(self._timeout_sec):
             self.get_logger().error(
@@ -141,34 +184,37 @@ class ManualHarvestSender(Node):
             f"Sending goal: left={self._goal.left_target.target_id} "
             f"right={self._goal.right_target.target_id}"
         )
-        send_future = self._client.send_goal_async(
-            self._goal, feedback_callback=lambda msg: self._print_feedback(msg.feedback)
+        return self._send_once()[0]
+
+    def run_loop(self):
+        """Repeat the same goal forever until Ctrl-C (SIGINT)."""
+        if not self._client.wait_for_server(self._timeout_sec):
+            self.get_logger().error(
+                f"ExecuteDualHarvest action server {ACTION_NAME} not available"
+            )
+            return 2
+        self.get_logger().info(
+            f"Loop mode: repeating left={self._goal.left_target.target_id} "
+            f"right={self._goal.right_target.target_id} every "
+            f"{self._loop_delay_sec:.1f}s until Ctrl-C"
         )
-        rclpy.spin_until_future_complete(self, send_future, timeout_sec=self._timeout_sec)
-        if not send_future.done():
-            self.get_logger().error("Timed out waiting for goal acceptance")
-            return 2
-        goal_handle = send_future.result()
-        if not goal_handle.accepted:
-            self.get_logger().error("Goal rejected by the harvest executor")
-            return 1
-
-        result_future = goal_handle.get_result_async()
-        rclpy.spin_until_future_complete(self, result_future, timeout_sec=self._timeout_sec)
-        if not result_future.done():
-            self.get_logger().error("Timed out waiting for the task result")
-            return 2
-
-        wrapped = result_future.result()
-        result = wrapped.result
-        if wrapped.status == 4:  # GoalStatus.STATUS_SUCCEEDED
-            self.get_logger().info(f"SUCCESS: {result.message}")
+        iteration = 0
+        try:
+            while rclpy.ok():
+                iteration += 1
+                self.get_logger().info(f"--- iteration {iteration} ---")
+                code, status = self._send_once()
+                if code != 0:
+                    self.get_logger().warn(
+                        f"iteration {iteration} did not succeed (status={status}); "
+                        "continuing after the delay"
+                    )
+                time.sleep(self._loop_delay_sec)
+        except KeyboardInterrupt:
+            self.get_logger().info(f"Loop stopped by user after {iteration} iterations")
             return 0
-        self.get_logger().error(
-            f"FAILED (status={wrapped.status}): "
-            f"failed_stage={result.failed_stage!r} message={result.message!r}"
-        )
-        return 1
+        self.get_logger().info(f"Loop stopped after {iteration} iterations")
+        return 0
 
 
 def parse_args(argv):
@@ -186,6 +232,17 @@ def parse_args(argv):
         type=float,
         default=600.0,
         help="Seconds to wait for acceptance and for the final result",
+    )
+    parser.add_argument(
+        "--loop",
+        action="store_true",
+        help="Repeat the same target pair forever until Ctrl-C",
+    )
+    parser.add_argument(
+        "--loop-delay",
+        type=float,
+        default=3.0,
+        help="Seconds to pause between loop iterations (default: 3.0)",
     )
     return parser.parse_args(argv)
 
@@ -210,16 +267,17 @@ def main(argv=None):
         return 2
     goal.execute_left = not args.no_left
     goal.execute_right = not args.no_right
-    # dry_run / plan_only live on the executor node's parameters
-    # (harvest_motion.yaml or `ros2 param set`), not on the goal message.
-
     rclpy.init()
-    node = ManualHarvestSender(goal, args.timeout)
+    node = ManualHarvestSender(goal, args.timeout, args.loop, args.loop_delay)
     try:
-        return node.run()
+        return node.run_loop() if args.loop else node.run()
+    except KeyboardInterrupt:
+        node.get_logger().info("Interrupted")
+        return 0
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            node.destroy_node()
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

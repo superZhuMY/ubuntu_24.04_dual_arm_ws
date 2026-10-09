@@ -16,6 +16,7 @@
 #include <array>
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -70,9 +71,8 @@ enum class Stage
   PICK,
   END_EFFECTOR,
   RETREAT,
-  PLACE,
-  RELEASE,
   HOME,
+  RELEASE_GRIPPER,
 };
 
 std::string stage_name(Stage stage);
@@ -123,15 +123,8 @@ private:
   bool joint_states_ready(
     const std::vector<std::string> & required_joints, std::string * error) const;
 
-  /// Generate the pose of one stage for one arm:
-  /// target position + R(target orientation) * tool offset.
-  geometry_msgs::msg::PoseStamped stage_target_pose(
-    const double_arm_harvest_interfaces::msg::HarvestTarget & target,
-    const std::array<double, 3> & tool_offset) const;
-
-  /// Generate the pose of one stage for one arm with a BASE-frame offset
-  /// (J3-extend mode: the offset follows the fixed prismatic axis instead of
-  /// the tool frame).
+  /// Generate an approach pose by applying a base-frame offset to the manual
+  /// pick pose.
   geometry_msgs::msg::PoseStamped stage_target_pose_base(
     const double_arm_harvest_interfaces::msg::HarvestTarget & target,
     const std::array<double, 3> & base_offset) const;
@@ -143,12 +136,10 @@ private:
     moveit::planning_interface::MoveGroupInterface & arm,
     const std::string & named_target);
 
-  /// Straight-line Cartesian plan from the CURRENT robot state to the target
-  /// pose (J3 extend/retract strokes). Succeeds only when the computed path
-  /// covers at least cartesian_min_fraction of the line.
-  ArmStagePlan plan_arm_cartesian(
-    moveit::planning_interface::MoveGroupInterface & arm,
-    const geometry_msgs::msg::PoseStamped & target_base_frame);
+  /// Plan from the current state while changing only the prismatic J3 target.
+  /// Positive delta extends to the manual pick point; negative delta retracts.
+  ArmStagePlan plan_arm_j3_delta(
+    moveit::planning_interface::MoveGroupInterface & arm, double delta);
 
   /// Dispatch both trajectories with one shared start time and wait until the
   /// stage barrier reaches a final verdict. Returns true when the stage may
@@ -156,9 +147,10 @@ private:
   bool run_stage_dispatch(
     const std::string & task_id, const std::string & stage_str,
     bool left_enabled, bool right_enabled, ArmStagePlan & left_plan,
-    ArmStagePlan & right_plan, std::string & error);
+    ArmStagePlan & right_plan, std::string & error,
+    double left_stagger_sec = 0.0, double right_stagger_sec = 0.0);
 
-  /// Move the enabled grippers through the single-bus controller and wait
+  /// Move the enabled grippers through the shared RS485 controller and wait
   /// until both position-feedback checks finish.
   bool run_gripper_command(
     bool left_enabled, bool right_enabled, double position, std::string & error);
@@ -187,34 +179,28 @@ private:
   double min_confidence_{0.5};
   double joint_state_timeout_sec_{1.0};
   double planning_time_sec_{3.0};
-  unsigned int planning_attempts_{5};
   double velocity_scale_{0.10};
   double acceleration_scale_{0.10};
   double sync_start_delay_sec_{0.5};
   double goal_accept_timeout_sec_{3.0};
   double stage_timeout_sec_{30.0};
   double cancel_timeout_sec_{3.0};
-  std::array<double, 3> left_approach_offset_{};
-  std::array<double, 3> left_pick_offset_{};
-  std::array<double, 3> left_retreat_offset_{};
-  std::array<double, 3> right_approach_offset_{};
-  std::array<double, 3> right_pick_offset_{};
-  std::array<double, 3> right_retreat_offset_{};
-  bool end_effector_enabled_{false};
   std::string gripper_action_name_;
   double gripper_open_position_{0.0};
   double gripper_close_position_{1.0};
   int gripper_duration_ms_{800};
   double gripper_action_timeout_sec_{8.0};
-  bool j3_extend_mode_{true};
   double j3_extend_distance_{0.05};
+  /// Tolerance for non-J3 joint drift during the J3-only stroke (rad / m).
+  double j3_stroke_tolerance_{0.005};
   std::array<double, 3> left_j3_extend_axis_{};
   std::array<double, 3> right_j3_extend_axis_{};
-  double cartesian_eef_step_{0.005};
-  double cartesian_min_fraction_{0.95};
-  bool place_enabled_{false};
-  bool dry_run_{false};
-  bool plan_only_{false};
+  /// "tomato_pick" (default, unchanged) or "leaf". In leaf mode the RETREAT
+  /// stage is staggered: right arm retracts first, left arm retracts after
+  /// leaf_left_retreat_delay_sec (keeps the left gripper on the fruit longer).
+  std::string task_mode_{"tomato_pick"};
+  double leaf_left_retreat_delay_sec_{3.0};
+  double leaf_right_retreat_delay_sec_{0.0};
 
   // ---- moveit / tf ----
   std::unique_ptr<moveit::planning_interface::MoveGroupInterface> left_arm_;
@@ -241,6 +227,7 @@ private:
   StageBarrier barrier_;
   std::mutex stage_mutex_;
   std::condition_variable stage_cv_;
+  uint64_t active_dispatch_id_{0};  // guarded by stage_mutex_
   std::string last_left_error_;
   std::string last_right_error_;
 

@@ -4,14 +4,15 @@ Brings up the full production chain on mock hardware
 (harvest_fake.launch.py: mock ros2_control -> ForwardCommandControllers ->
 streaming_trajectory_executor -> move_group -> dual_arm_harvest_executor, plus
 the dual-gripper mock action server)
-and exercises two task outcomes:
+and exercises three task outcomes:
 
-1. one coordinated dual-arm task runs end to end and returns SUCCEEDED;
-2. an unreachable target aborts at APPROACH and the message states that
+1. cancellation during APPROACH planning sends no arm motion targets;
+2. one coordinated dual-arm task runs end to end and returns SUCCEEDED;
+3. an unreachable target aborts at APPROACH and the message states that
    nothing was dispatched.
 
-NOTE: the two tests share one bring-up and run in order; the first leaves
-both arms at HOME which is a valid start for the second.
+NOTE: the tests share one bring-up. The canceled task leaves the initial
+state unchanged, and the full task leaves both arms at HOME.
 """
 
 import os
@@ -32,6 +33,7 @@ from double_arm_harvest_interfaces.action import ExecuteDualHarvest
 from double_arm_harvest_interfaces.msg import HarvestTarget
 from geometry_msgs.msg import Point, Quaternion
 from rclpy.action import ActionClient
+from std_msgs.msg import Float64MultiArray
 
 # Interior, non-singular TCP poses derived from FK of joint configurations
 # inside the prismatic limits (see config/manual_targets.yaml).
@@ -49,10 +51,7 @@ def generate_test_description():
         launch.actions.IncludeLaunchDescription(
             launch.launch_description_sources.PythonLaunchDescriptionSource(
                 fake_launch),
-            launch_arguments={
-                "start_rviz": "false",
-                "mock_grippers": "true",
-            }.items(),
+            launch_arguments={"start_rviz": "false"}.items(),
         ),
         launch_testing.actions.ReadyToTest(),
     ])
@@ -90,8 +89,9 @@ class FakeHarvestIntegration(unittest.TestCase):
         goal.execute_right = True
         return goal
 
-    def _send_and_wait(self, goal, result_timeout=180.0):
+    def _send_and_wait(self, goal, result_timeout=180.0, feedback_callback=None):
         client = ActionClient(self.node, ExecuteDualHarvest, "/execute_dual_harvest")
+        self._active_goal_handle = None
         self.assertTrue(client.wait_for_server(timeout_sec=60.0))
         try:
             # move_group may still be starting: retry until the goal is accepted.
@@ -99,7 +99,7 @@ class FakeHarvestIntegration(unittest.TestCase):
             accept_deadline = time.monotonic() + 120.0
             while goal_handle is None and time.monotonic() < accept_deadline:
                 future = client.send_goal_async(
-                    goal, feedback_callback=lambda feedback: None)
+                    goal, feedback_callback=feedback_callback or (lambda feedback: None))
                 rclpy.spin_until_future_complete(self.node, future, timeout_sec=30.0)
                 if future.done() and future.result().accepted:
                     goal_handle = future.result()
@@ -107,6 +107,7 @@ class FakeHarvestIntegration(unittest.TestCase):
                     time.sleep(3.0)
             self.assertIsNotNone(
                 goal_handle, "goal was never accepted (move_group not ready?)")
+            self._active_goal_handle = goal_handle
 
             result_future = goal_handle.get_result_async()
             rclpy.spin_until_future_complete(
@@ -127,6 +128,38 @@ class FakeHarvestIntegration(unittest.TestCase):
         self.assertTrue(wrapped.result.left_success)
         self.assertTrue(wrapped.result.right_success)
         self.assertEqual(wrapped.result.failed_stage, "")
+
+    def test_cancel_during_planning_does_not_dispatch(self):
+        commands = []
+        subscriptions = [
+            self.node.create_subscription(
+                Float64MultiArray,
+                f"/double_arm_robot/{side}_arm_position/commands",
+                lambda msg: commands.append(list(msg.data)), 10)
+            for side in ("l", "r")
+        ]
+        cancel_future = None
+
+        def feedback(msg):
+            nonlocal cancel_future
+            if (msg.feedback.message == "planning APPROACH" and
+                    self._active_goal_handle is not None and cancel_future is None):
+                cancel_future = self._active_goal_handle.cancel_goal_async()
+
+        try:
+            wrapped = self._send_and_wait(
+                self._goal("cancel_left_001", "cancel_right_001"),
+                feedback_callback=feedback)
+            self.assertIsNotNone(cancel_future, "planning feedback never triggered cancel")
+            rclpy.spin_until_future_complete(self.node, cancel_future, timeout_sec=5.0)
+            self.assertTrue(cancel_future.done())
+            self.assertEqual(cancel_future.result().return_code, 0)
+            self.assertEqual(wrapped.status, GoalStatus.STATUS_CANCELED)
+            self.assertEqual(wrapped.result.failed_stage, "APPROACH")
+            self.assertEqual(commands, [], "canceled planning still published arm targets")
+        finally:
+            for sub in subscriptions:
+                self.node.destroy_subscription(sub)
 
     def test_unreachable_target_aborts_without_dispatch(self):
         goal = self._goal("it_left_002", "it_right_002")

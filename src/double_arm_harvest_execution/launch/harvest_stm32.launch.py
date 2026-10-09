@@ -5,32 +5,60 @@ only adds:
   - allow_simultaneous_arms:=true for the sparse/streaming executor, so the
     two arms may run concurrently (calibration launches keep the default
     false);
-  - dual_arm_harvest_executor with harvest_motion.yaml;
-  - an optional manual goal sender (send_manual_goal, default false; prefer
-    running send_manual_harvest_goal.py manually after the "move groups
-    ready" log to avoid a startup race).
+  - the RS485 gripper controller with its checked-in configuration;
+  - dual_arm_harvest_executor with the single manual-target workflow.
+
+The launch never sends a motion goal by itself. After "move groups ready",
+run send_manual_harvest_goal.py with the YAML containing the measured points.
 
 The stm32_* arguments mirror stm32_moveit.launch.py and are forwarded
 unchanged, so the harvest node builds its robot_description from exactly the
 same xacro expansion as the included chain.
 """
 
-import os
-
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
-from launch.conditions import IfCondition
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
-from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 from moveit_configs_utils import MoveItConfigsBuilder
+
+import os
+import tempfile
+
+import yaml
+from ament_index_python.packages import get_package_share_directory
+
+NODE_NAME = "dual_arm_harvest_executor"
+
+
+def _harvest_motion_default(key, fallback):
+    """Read a default from harvest_motion.yaml so the YAML stays the source."""
+    path = os.path.join(
+        get_package_share_directory("double_arm_harvest_execution"),
+        "config", "harvest_motion.yaml")
+    with open(path, encoding="utf-8") as handle:
+        params = yaml.safe_load(handle)[NODE_NAME]["ros__parameters"]
+    return str(params.get(key, fallback))
+
+
+def _node_override(**params):
+    """Write a node-specific override file so launch wins over the YAML.
+
+    launch_ros turns a plain ``{key: value}`` dict into a ``/**`` wildcard
+    section, which loses against the node-specific section in
+    harvest_motion.yaml. A node-named temporary file wins instead.
+    """
+    handle, path = tempfile.mkstemp(prefix="harvest_override_", suffix=".yaml")
+    with os.fdopen(handle, "w", encoding="utf-8") as stream:
+        yaml.safe_dump({NODE_NAME: {"ros__parameters": params}}, stream)
+    return path
 
 
 def generate_launch_description():
     args = {
-        "stm32_device": ("/dev/serial/by-id/usb-AIMotor_F407", None),
+        "stm32_device": ("/dev/ttyUSB0", None),
         "stm32_baud_rate": ("115200", None),
         "stm32_target_ack_timeout_ms": ("200", None),
         "stm32_state_timeout_ms": ("200", None),
@@ -45,16 +73,9 @@ def generate_launch_description():
         "stm32_joint_directions": ("1,1,1,1,-1,1,1,1,1,1,-1,1", None),
         "allow_motor_enable": ("true", ["true", "false"]),
         "start_rviz": ("true", ["true", "false"]),
-        "send_manual_goal": ("false", ["true", "false"]),
-        "start_grippers": ("false", ["true", "false"]),
-        "gripper_allow_motion": ("false", ["true", "false"]),
         "gripper_device": ("/dev/tcp_gripper", None),
-        "left_servo_id": ("1", None),
-        "right_servo_id": ("2", None),
-        "left_open_pulse": ("1450", None),
-        "left_closed_pulse": ("1550", None),
-        "right_open_pulse": ("1450", None),
-        "right_closed_pulse": ("1550", None),
+        "task_mode": (_harvest_motion_default("task_mode", "tomato_pick"),
+                      ["tomato_pick", "leaf"]),
     }
     decls = []
     lcs = {}
@@ -105,10 +126,6 @@ def generate_launch_description():
         moveit_config.robot_description_semantic,
         moveit_config.robot_description_kinematics,
         harvest_motion_file,
-        {
-            "end_effector_enabled": ParameterValue(
-                lcs["start_grippers"], value_type=bool),
-        },
     ]
 
     gripper_config = PathJoinSubstitution(
@@ -121,38 +138,23 @@ def generate_launch_description():
             executable="dual_gripper_controller",
             name="dual_gripper_controller",
             output="screen",
-            condition=IfCondition(lcs["start_grippers"]),
             parameters=[gripper_config, {
                 "device": lcs["gripper_device"],
-                "allow_motion": ParameterValue(
-                    lcs["gripper_allow_motion"], value_type=bool),
-                "left_servo_id": ParameterValue(lcs["left_servo_id"], value_type=int),
-                "right_servo_id": ParameterValue(lcs["right_servo_id"], value_type=int),
-                "left_open_pulse": ParameterValue(
-                    lcs["left_open_pulse"], value_type=int),
-                "left_closed_pulse": ParameterValue(
-                    lcs["left_closed_pulse"], value_type=int),
-                "right_open_pulse": ParameterValue(
-                    lcs["right_open_pulse"], value_type=int),
-                "right_closed_pulse": ParameterValue(
-                    lcs["right_closed_pulse"], value_type=int),
+                "allow_motion": True,
             }],
         ),
-        Node(
+    ]
+
+    def _harvest_node(context):
+        override = _node_override(
+            task_mode=LaunchConfiguration("task_mode").perform(context))
+        return [Node(
             package="double_arm_harvest_execution",
             executable="dual_arm_harvest_executor",
-            name="dual_arm_harvest_executor",
+            name=NODE_NAME,
             output="screen",
-            parameters=harvest_params,
-        ),
-        Node(
-            package="double_arm_harvest_execution",
-            executable="send_manual_harvest_goal.py",
-            name="send_manual_harvest_goal",
-            output="screen",
-            condition=IfCondition(lcs["send_manual_goal"]),
-        ),
-    ]
+            parameters=harvest_params + [override],
+        )]
 
     include_arguments = {
         "hardware_mode": "real",
@@ -177,4 +179,4 @@ def generate_launch_description():
             PythonLaunchDescriptionSource(stm32_launch),
             launch_arguments=include_arguments.items(),
         ),
-    ] + nodes)
+    ] + nodes + [OpaqueFunction(function=_harvest_node)])

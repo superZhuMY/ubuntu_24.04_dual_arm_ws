@@ -12,33 +12,57 @@ The streaming executor runs with allow_simultaneous_arms=true, so the same
 goal gating, shared start stamp and stage barrier are exercised here as on
 the STM32 hardware.
 
-Launch arguments:
-  start_rviz       default false (enable for visual inspection)
-  plan_only        default false; true = plan every stage, never dispatch
-  dry_run          default false; true = validate only, no planning
-  send_manual_goal default false; fire one goal from manual_targets.yaml at
-                   startup (prefer running the sender manually after the
-                   "move groups ready" log to avoid a startup race)
+The only mode option is RViz visibility. The mock gripper and the complete
+manual-target workflow are always enabled. Send a target after the
+"move groups ready" log with send_manual_harvest_goal.py.
 """
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
-from launch.conditions import IfCondition
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
-from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 from moveit_configs_utils import MoveItConfigsBuilder
+
+import os
+import tempfile
+
+import yaml
+from ament_index_python.packages import get_package_share_directory
+
+NODE_NAME = "dual_arm_harvest_executor"
+
+
+def _harvest_motion_default(key, fallback):
+    """Read a default from harvest_motion.yaml so the YAML stays the source."""
+    path = os.path.join(
+        get_package_share_directory("double_arm_harvest_execution"),
+        "config", "harvest_motion.yaml")
+    with open(path, encoding="utf-8") as handle:
+        params = yaml.safe_load(handle)[NODE_NAME]["ros__parameters"]
+    return str(params.get(key, fallback))
+
+
+def _node_override(**params):
+    """Write a node-specific override file.
+
+    launch_ros turns a plain ``{key: value}`` dict into a ``/**`` wildcard
+    section, which loses against the node-specific section in
+    harvest_motion.yaml. A node-named temporary file wins instead, so the
+    launch override can actually replace the YAML default.
+    """
+    handle, path = tempfile.mkstemp(prefix="harvest_override_", suffix=".yaml")
+    with os.fdopen(handle, "w", encoding="utf-8") as stream:
+        yaml.safe_dump({NODE_NAME: {"ros__parameters": params}}, stream)
+    return path
 
 
 def generate_launch_description():
     args = {
         "start_rviz": ("false", ["true", "false"]),
-        "plan_only": ("false", ["true", "false"]),
-        "dry_run": ("false", ["true", "false"]),
-        "send_manual_goal": ("false", ["true", "false"]),
-        "mock_grippers": ("false", ["true", "false"]),
+        "task_mode": (_harvest_motion_default("task_mode", "tomato_pick"),
+                      ["tomato_pick", "leaf"]),
     }
     decls = []
     lcs = {}
@@ -72,12 +96,6 @@ def generate_launch_description():
         moveit_config.robot_description_semantic,
         moveit_config.robot_description_kinematics,
         harvest_motion_file,
-        {
-            "plan_only": ParameterValue(lcs["plan_only"], value_type=bool),
-            "dry_run": ParameterValue(lcs["dry_run"], value_type=bool),
-            "end_effector_enabled": ParameterValue(
-                lcs["mock_grippers"], value_type=bool),
-        },
     ]
 
     gripper_config = PathJoinSubstitution(
@@ -90,27 +108,23 @@ def generate_launch_description():
             executable="dual_gripper_controller",
             name="dual_gripper_controller",
             output="screen",
-            condition=IfCondition(lcs["mock_grippers"]),
             parameters=[gripper_config, {
                 "mock_hardware": True,
                 "allow_motion": True,
             }],
         ),
-        Node(
+    ]
+
+    def _harvest_node(context):
+        override = _node_override(
+            task_mode=LaunchConfiguration("task_mode").perform(context))
+        return [Node(
             package="double_arm_harvest_execution",
             executable="dual_arm_harvest_executor",
-            name="dual_arm_harvest_executor",
+            name=NODE_NAME,
             output="screen",
-            parameters=harvest_params,
-        ),
-        Node(
-            package="double_arm_harvest_execution",
-            executable="send_manual_harvest_goal.py",
-            name="send_manual_harvest_goal",
-            output="screen",
-            condition=IfCondition(lcs["send_manual_goal"]),
-        ),
-    ]
+            parameters=harvest_params + [override],
+        )]
 
     return LaunchDescription(decls + [
         IncludeLaunchDescription(
@@ -121,4 +135,4 @@ def generate_launch_description():
                 "start_rviz": lcs["start_rviz"],
             }.items(),
         ),
-    ] + nodes)
+    ] + nodes + [OpaqueFunction(function=_harvest_node)])
