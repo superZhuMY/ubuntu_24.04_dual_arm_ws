@@ -27,7 +27,7 @@ from launch_ros.substitutions import FindPackageShare
 
 def generate_launch_description():
     args = {
-        "stm32_device": ("/dev/serial/by-id/usb-AIMotor_F407", None),
+        "stm32_device": ("/dev/ttyUSB0", None),
         "stm32_baud_rate": ("115200", None),
         "stm32_target_ack_timeout_ms": ("200", None),
         "stm32_state_timeout_ms": ("200", None),

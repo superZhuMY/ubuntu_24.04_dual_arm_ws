@@ -32,7 +32,7 @@ def generate_launch_description():
     args = {
         # fake is only used by harvest_fake.launch.py (mock hardware, no serial)
         "hardware_mode": ("real", ["real", "fake"]),
-        "stm32_device": ("/dev/serial/by-id/usb-AIMotor_F407", None),
+        "stm32_device": ("/dev/ttyUSB0", None),
         "stm32_baud_rate": ("115200", None),
         "stm32_target_ack_timeout_ms": ("200", None),
         "stm32_state_timeout_ms": ("200", None),
