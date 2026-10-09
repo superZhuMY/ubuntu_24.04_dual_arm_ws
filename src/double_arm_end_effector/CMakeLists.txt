@@ -13,18 +13,21 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
 find_package(double_arm_harvest_interfaces REQUIRED)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(MODBUS REQUIRED IMPORTED_TARGET libmodbus)
 
-add_library(serial_bus_servo_protocol STATIC
-  src/serial_bus_servo_protocol.cpp
-  src/serial_bus.cpp
+add_library(gripper_modbus STATIC
+  src/gripper_mapping.cpp
+  src/modbus_rtu_bus.cpp
 )
-target_include_directories(serial_bus_servo_protocol PUBLIC
+target_include_directories(gripper_modbus PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
+target_link_libraries(gripper_modbus PUBLIC PkgConfig::MODBUS)
 
 add_executable(dual_gripper_controller src/dual_gripper_controller.cpp)
-target_link_libraries(dual_gripper_controller serial_bus_servo_protocol)
+target_link_libraries(dual_gripper_controller gripper_modbus)
 ament_target_dependencies(dual_gripper_controller
   rclcpp
   rclcpp_action
@@ -32,7 +35,7 @@ ament_target_dependencies(dual_gripper_controller
 )
 
 install(TARGETS
-  serial_bus_servo_protocol
+  gripper_modbus
   dual_gripper_controller
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
@@ -43,9 +46,8 @@ install(DIRECTORY config launch DESTINATION share/${PROJECT_NAME})
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
-  ament_add_gtest(test_serial_bus_servo_protocol
-    test/test_serial_bus_servo_protocol.cpp)
-  target_link_libraries(test_serial_bus_servo_protocol serial_bus_servo_protocol)
+  ament_add_gtest(test_gripper_mapping test/test_gripper_mapping.cpp)
+  target_link_libraries(test_gripper_mapping gripper_modbus)
 endif()
 
 ament_export_include_directories(include)

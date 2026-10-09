@@ -1,5 +1,15 @@
-"""Launch the two gripper servos on one USB/TTL half-duplex bus."""
+"""Launch both grippers on the legacy shared RS485 Modbus RTU bus.
 
+Parameter defaults are read from config/dual_gripper.yaml at launch time, so
+this entry and the harvest_stm32 chain share one source of truth. The values
+are still re-exposed as launch arguments, which means a bench test can override
+any of them on the command line without editing the YAML.
+"""
+
+import os
+
+import yaml
+from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
@@ -7,19 +17,32 @@ from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
+NODE_NAME = "dual_gripper_controller"
+BOOLEAN_ARGUMENTS = ("allow_motion", "mock_hardware")
+INTEGER_ARGUMENTS = (
+    "slave_id", "left_register", "right_register",
+    "left_open_value", "left_closed_value", "right_open_value",
+    "right_closed_value",
+)
+
+
+def _yaml_parameter_defaults():
+    """Read the node's parameter block so the YAML stays the only source."""
+    path = os.path.join(
+        get_package_share_directory("double_arm_end_effector"),
+        "config", "dual_gripper.yaml")
+    with open(path, encoding="utf-8") as handle:
+        return yaml.safe_load(handle)[NODE_NAME]["ros__parameters"]
+
 
 def generate_launch_description():
-    arguments = {
-        "device": "/dev/tcp_gripper",
-        "allow_motion": "false",
-        "mock_hardware": "false",
-        "left_servo_id": "1",
-        "right_servo_id": "2",
-        "left_open_pulse": "1450",
-        "left_closed_pulse": "1550",
-        "right_open_pulse": "1450",
-        "right_closed_pulse": "1550",
-    }
+    defaults = _yaml_parameter_defaults()
+    arguments = {"device": str(defaults["device"])}
+    for name in BOOLEAN_ARGUMENTS:
+        arguments[name] = str(bool(defaults[name])).lower()
+    for name in INTEGER_ARGUMENTS:
+        arguments[name] = str(int(defaults[name]))
+
     declarations = [
         DeclareLaunchArgument(name, default_value=value)
         for name, value in arguments.items()
@@ -28,21 +51,21 @@ def generate_launch_description():
     config = PathJoinSubstitution(
         [FindPackageShare("double_arm_end_effector"), "config", "dual_gripper.yaml"])
 
+    overrides = {"device": values["device"]}
+    overrides.update({
+        name: ParameterValue(values[name], value_type=bool)
+        for name in BOOLEAN_ARGUMENTS
+    })
+    overrides.update({
+        name: ParameterValue(values[name], value_type=int)
+        for name in INTEGER_ARGUMENTS
+    })
+
     node = Node(
         package="double_arm_end_effector",
         executable="dual_gripper_controller",
-        name="dual_gripper_controller",
+        name=NODE_NAME,
         output="screen",
-        parameters=[config, {
-            "device": values["device"],
-            "allow_motion": ParameterValue(values["allow_motion"], value_type=bool),
-            "mock_hardware": ParameterValue(values["mock_hardware"], value_type=bool),
-            "left_servo_id": ParameterValue(values["left_servo_id"], value_type=int),
-            "right_servo_id": ParameterValue(values["right_servo_id"], value_type=int),
-            "left_open_pulse": ParameterValue(values["left_open_pulse"], value_type=int),
-            "left_closed_pulse": ParameterValue(values["left_closed_pulse"], value_type=int),
-            "right_open_pulse": ParameterValue(values["right_open_pulse"], value_type=int),
-            "right_closed_pulse": ParameterValue(values["right_closed_pulse"], value_type=int),
-        }],
+        parameters=[config, overrides],
     )
     return LaunchDescription(declarations + [node])

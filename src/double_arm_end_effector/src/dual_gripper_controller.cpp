@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -14,8 +15,8 @@
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
 
-#include "double_arm_end_effector/serial_bus.hpp"
-#include "double_arm_end_effector/serial_bus_servo_protocol.hpp"
+#include "double_arm_end_effector/gripper_mapping.hpp"
+#include "double_arm_end_effector/modbus_rtu_bus.hpp"
 
 namespace double_arm_end_effector
 {
@@ -30,24 +31,28 @@ public:
   : Node("dual_gripper_controller")
   {
     device_ = declare_parameter<std::string>("device", "/dev/tcp_gripper");
-    baud_rate_ = declare_parameter<int>("baud_rate", 115200);
+    baud_rate_ = declare_parameter<int>("baud_rate", 9600);
+    const auto parity = declare_parameter<std::string>("parity", "N");
+    data_bits_ = declare_parameter<int>("data_bits", 8);
+    stop_bits_ = declare_parameter<int>("stop_bits", 1);
+    response_timeout_ms_ = declare_parameter<int>("response_timeout_ms", 1000);
+    slave_id_ = declare_parameter<int>("slave_id", 4);
+    left_register_ = declare_parameter<int>("left_register", 2);
+    right_register_ = declare_parameter<int>("right_register", 1);
+    left_open_value_ = declare_parameter<int>("left_open_value", 25);
+    left_closed_value_ = declare_parameter<int>("left_closed_value", 60);
+    right_open_value_ = declare_parameter<int>("right_open_value", 25);
+    right_closed_value_ = declare_parameter<int>("right_closed_value", 40);
+    write_repeats_ = declare_parameter<int>("write_repeats", 2);
+    write_delay_ms_ = declare_parameter<int>("write_delay_ms", 500);
     allow_motion_ = declare_parameter<bool>("allow_motion", false);
     mock_hardware_ = declare_parameter<bool>("mock_hardware", false);
-    left_id_ = declare_parameter<int>("left_servo_id", 1);
-    right_id_ = declare_parameter<int>("right_servo_id", 2);
-    left_open_pulse_ = declare_parameter<int>("left_open_pulse", 1450);
-    left_closed_pulse_ = declare_parameter<int>("left_closed_pulse", 1550);
-    right_open_pulse_ = declare_parameter<int>("right_open_pulse", 1450);
-    right_closed_pulse_ = declare_parameter<int>("right_closed_pulse", 1550);
-    read_timeout_ms_ = declare_parameter<int>("read_timeout_ms", 120);
-    poll_hz_ = declare_parameter<double>("poll_hz", 10.0);
-    tolerance_pulse_ = declare_parameter<int>("tolerance_pulse", 20);
-    stable_samples_ = declare_parameter<int>("stable_samples", 2);
-    goal_timeout_sec_ = declare_parameter<double>("goal_timeout_sec", 5.0);
 
-    validate_parameters();
+    parity_ = parity.empty() ? '\0' : parity.front();
+    validate_parameters(parity);
     if (!mock_hardware_) {
-      serial_.open_port(device_, baud_rate_);
+      bus_.open_port(
+        device_, baud_rate_, parity_, data_bits_, stop_bits_, response_timeout_ms_);
     }
 
     action_server_ = rclcpp_action::create_server<Command>(
@@ -59,45 +64,65 @@ public:
 
     RCLCPP_INFO(
       get_logger(),
-      "dual gripper ready: mode=%s device=%s ids=(%d,%d) allow_motion=%d",
-      mock_hardware_ ? "mock" : "serial", device_.c_str(), left_id_, right_id_,
-      static_cast<int>(allow_motion_));
+      "dual gripper ready: mode=%s device=%s RTU=%d,%c,%d,%d endpoints=(%d:%d,%d:%d)",
+      mock_hardware_ ? "mock" : "modbus-rtu", device_.c_str(), baud_rate_, parity_,
+      data_bits_, stop_bits_, slave_id_, left_register_, slave_id_, right_register_);
     if (!allow_motion_ && !mock_hardware_) {
       RCLCPP_WARN(
         get_logger(),
-        "real gripper motion is locked; calibrate pulse limits, then launch with "
-        "gripper_allow_motion:=true");
+        "real gripper motion is locked; verify slave/register mapping and calibration, then "
+        "set gripper_allow_motion:=true");
+    }
+  }
+
+  ~DualGripperController() override
+  {
+    cancel_requested_.store(true);
+    std::lock_guard<std::mutex> lock(worker_mutex_);
+    if (worker_.joinable()) {
+      worker_.join();
     }
   }
 
 private:
-  void validate_parameters() const
+  static constexpr uint32_t kMaxDurationMs = 60000;
+
+  void validate_parameters(const std::string & parity) const
   {
-    if (!valid_servo_id(left_id_) || !valid_servo_id(right_id_) || left_id_ == right_id_) {
-      throw std::runtime_error("left/right servo ids must be distinct values in [0, 254]");
-    }
-    (void)normalized_to_pulse(0.0, left_open_pulse_, left_closed_pulse_);
-    (void)normalized_to_pulse(0.0, right_open_pulse_, right_closed_pulse_);
-    if (baud_rate_ != 115200 || read_timeout_ms_ <= 0 || poll_hz_ <= 0.0 ||
-      tolerance_pulse_ < 0 || stable_samples_ <= 0 || goal_timeout_sec_ <= 0.0)
+    if (device_.empty() || baud_rate_ <= 0 || parity.size() != 1 ||
+      (parity_ != 'N' && parity_ != 'E' && parity_ != 'O') ||
+      (data_bits_ != 7 && data_bits_ != 8) || (stop_bits_ != 1 && stop_bits_ != 2) ||
+      response_timeout_ms_ <= 0)
     {
-      throw std::runtime_error("invalid baud, polling, tolerance, or timeout parameter");
+      throw std::runtime_error("invalid Modbus RTU serial parameters");
+    }
+    if (!valid_modbus_slave_id(slave_id_)) {
+      throw std::runtime_error("Modbus slave ID must be in [1, 247]");
+    }
+    if (!valid_modbus_register(left_register_) || !valid_modbus_register(right_register_) ||
+      left_register_ == right_register_)
+    {
+      throw std::runtime_error(
+              "left/right Modbus endpoints must be valid and must not be identical");
+    }
+    (void)normalized_to_register(0.0, left_open_value_, left_closed_value_);
+    (void)normalized_to_register(0.0, right_open_value_, right_closed_value_);
+    if (write_repeats_ <= 0 || write_delay_ms_ < 0) {
+      throw std::runtime_error("write_repeats must be positive and write_delay_ms non-negative");
     }
   }
 
   rclcpp_action::GoalResponse on_goal(
-    const rclcpp_action::GoalUUID &,
-    std::shared_ptr<const Command::Goal> goal)
+    const rclcpp_action::GoalUUID &, std::shared_ptr<const Command::Goal> goal)
   {
     if (!goal->command_left && !goal->command_right) {
       RCLCPP_WARN(get_logger(), "rejecting gripper goal: neither side is enabled");
       return rclcpp_action::GoalResponse::REJECT;
     }
-    if ((!std::isfinite(goal->left_position) || goal->left_position < 0.0F ||
-      goal->left_position > 1.0F) ||
-      (!std::isfinite(goal->right_position) || goal->right_position < 0.0F ||
-      goal->right_position > 1.0F) ||
-      goal->duration_ms > static_cast<uint32_t>(kMaxDurationMs))
+    if (!std::isfinite(goal->left_position) || goal->left_position < 0.0F ||
+      goal->left_position > 1.0F || !std::isfinite(goal->right_position) ||
+      goal->right_position < 0.0F || goal->right_position > 1.0F ||
+      goal->duration_ms > kMaxDurationMs)
     {
       RCLCPP_WARN(get_logger(), "rejecting gripper goal: position or duration is invalid");
       return rclcpp_action::GoalResponse::REJECT;
@@ -124,38 +149,73 @@ private:
 
   void on_accepted(const std::shared_ptr<GoalHandle> goal_handle)
   {
-    std::thread([this, goal_handle]() {execute(goal_handle);}).detach();
+    std::lock_guard<std::mutex> lock(worker_mutex_);
+    if (worker_.joinable()) {
+      worker_.join();
+    }
+    worker_ = std::thread([this, goal_handle]() {execute(goal_handle);});
+  }
+
+  bool canceled(const std::shared_ptr<GoalHandle> & goal_handle) const
+  {
+    return cancel_requested_.load() || goal_handle->is_canceling();
+  }
+
+  bool interruptible_wait(
+    const std::shared_ptr<GoalHandle> & goal_handle, std::chrono::milliseconds duration) const
+  {
+    const auto deadline = std::chrono::steady_clock::now() + duration;
+    while (std::chrono::steady_clock::now() < deadline) {
+      if (canceled(goal_handle)) {
+        return false;
+      }
+      const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+        deadline - std::chrono::steady_clock::now());
+      std::this_thread::sleep_for(std::min(remaining, std::chrono::milliseconds(10)));
+    }
+    return !canceled(goal_handle);
   }
 
   void publish_feedback(
-    const std::shared_ptr<GoalHandle> & goal_handle, int left_pulse, int right_pulse,
-    bool left_reached, bool right_reached) const
+    const std::shared_ptr<GoalHandle> & goal_handle, float left_position,
+    float right_position, bool left_reached, bool right_reached) const
   {
     auto feedback = std::make_shared<Command::Feedback>();
-    feedback->left_position = left_pulse < 0 ? -1.0F : static_cast<float>(
-      pulse_to_normalized(left_pulse, left_open_pulse_, left_closed_pulse_));
-    feedback->right_position = right_pulse < 0 ? -1.0F : static_cast<float>(
-      pulse_to_normalized(right_pulse, right_open_pulse_, right_closed_pulse_));
+    feedback->left_position = left_position;
+    feedback->right_position = right_position;
     feedback->left_reached = left_reached;
     feedback->right_reached = right_reached;
     goal_handle->publish_feedback(feedback);
   }
 
-  void stop_enabled(bool left, bool right)
+  bool write_target(
+    const std::shared_ptr<GoalHandle> & goal_handle, int slave_id, int address,
+    uint16_t value)
   {
-    if (mock_hardware_) {
-      return;
+    for (int attempt = 0; attempt < write_repeats_; ++attempt) {
+      if (canceled(goal_handle)) {
+        return false;
+      }
+      if (!mock_hardware_) {
+        bus_.write_register(slave_id, address, value);
+      }
+      if (attempt + 1 < write_repeats_ &&
+        !interruptible_wait(goal_handle, std::chrono::milliseconds(write_delay_ms_)))
+      {
+        return false;
+      }
     }
-    std::string command;
-    if (left) {
-      command += stop_command(left_id_);
-    }
-    if (right) {
-      command += stop_command(right_id_);
-    }
-    if (!command.empty()) {
-      serial_.write_command(command);
-    }
+    return true;
+  }
+
+  void finish_canceled(
+    const std::shared_ptr<GoalHandle> & goal_handle,
+    const std::shared_ptr<Command::Result> & result)
+  {
+    result->success = false;
+    result->message =
+      "gripper command canceled; legacy Modbus interface has no stop register";
+    goal_handle->canceled(result);
   }
 
   void execute(const std::shared_ptr<GoalHandle> goal_handle)
@@ -173,139 +233,85 @@ private:
 
     const auto goal = goal_handle->get_goal();
     auto result = std::make_shared<Command::Result>();
-    const int left_target = normalized_to_pulse(
-      goal->left_position, left_open_pulse_, left_closed_pulse_);
-    const int right_target = normalized_to_pulse(
-      goal->right_position, right_open_pulse_, right_closed_pulse_);
-    result->left_pulse = -1;
-    result->right_pulse = -1;
+    const uint16_t left_target = normalized_to_register(
+      goal->left_position, left_open_value_, left_closed_value_);
+    const uint16_t right_target = normalized_to_register(
+      goal->right_position, right_open_value_, right_closed_value_);
+    result->left_pulse = goal->command_left ? static_cast<int32_t>(left_target) : -1;
+    result->right_pulse = goal->command_right ? static_cast<int32_t>(right_target) : -1;
 
     try {
-      std::string command;
-      if (goal->command_left) {
-        command += move_command(left_id_, left_target, goal->duration_ms);
+      publish_feedback(
+        goal_handle, goal->left_position, goal->right_position, false, false);
+      if (goal->command_left &&
+        !write_target(goal_handle, slave_id_, left_register_, left_target))
+      {
+        finish_canceled(goal_handle, result);
+        return;
       }
-      if (goal->command_right) {
-        command += move_command(right_id_, right_target, goal->duration_ms);
+      if (goal->command_right &&
+        !write_target(goal_handle, slave_id_, right_register_, right_target))
+      {
+        finish_canceled(goal_handle, result);
+        return;
       }
-      if (!mock_hardware_) {
-        // Direct UART/TTL accepts concatenated commands without braces. One
-        // write gives both servos the closest possible start time.
-        serial_.write_command(command);
-      }
+
       RCLCPP_INFO(
-        get_logger(), "gripper command sent: left=%s(%d) right=%s(%d) duration=%ums",
-        goal->command_left ? "on" : "off", left_target,
-        goal->command_right ? "on" : "off", right_target, goal->duration_ms);
+        get_logger(),
+        "Modbus gripper command acknowledged: left=%s(slave=%d reg=%d value=%u) "
+        "right=%s(slave=%d reg=%d value=%u), settle=%ums",
+        goal->command_left ? "on" : "off", slave_id_, left_register_, left_target,
+        goal->command_right ? "on" : "off", slave_id_, right_register_, right_target,
+        goal->duration_ms);
 
-      int left_last = -1;
-      int right_last = -1;
-      int left_stable = goal->command_left ? 0 : stable_samples_;
-      int right_stable = goal->command_right ? 0 : stable_samples_;
-      const auto start = std::chrono::steady_clock::now();
-      const auto deadline = start + std::chrono::duration<double>(goal_timeout_sec_);
-      const auto poll_period = std::chrono::duration<double>(1.0 / poll_hz_);
-
-      while (std::chrono::steady_clock::now() < deadline) {
-        if (cancel_requested_.load()) {
-          stop_enabled(goal->command_left, goal->command_right);
-          result->success = false;
-          result->message = "gripper command canceled; stop sent";
-          goal_handle->canceled(result);
-          return;
-        }
-
-        if (mock_hardware_) {
-          const double duration_sec = std::max(0.001, goal->duration_ms / 1000.0);
-          const double elapsed = std::chrono::duration<double>(
-            std::chrono::steady_clock::now() - start).count();
-          const double ratio = std::clamp(elapsed / duration_sec, 0.0, 1.0);
-          left_last = goal->command_left ? static_cast<int>(std::lround(
-            left_open_pulse_ + ratio * (left_target - left_open_pulse_))) : -1;
-          right_last = goal->command_right ? static_cast<int>(std::lround(
-            right_open_pulse_ + ratio * (right_target - right_open_pulse_))) : -1;
-        } else {
-          if (goal->command_left) {
-            if (const auto pulse = serial_.read_position(
-                left_id_, std::chrono::milliseconds(read_timeout_ms_)))
-            {
-              left_last = *pulse;
-            }
-          }
-          if (goal->command_right) {
-            if (const auto pulse = serial_.read_position(
-                right_id_, std::chrono::milliseconds(read_timeout_ms_)))
-            {
-              right_last = *pulse;
-            }
-          }
-        }
-
-        const bool left_in_tolerance = !goal->command_left ||
-          (left_last >= 0 && std::abs(left_last - left_target) <= tolerance_pulse_);
-        const bool right_in_tolerance = !goal->command_right ||
-          (right_last >= 0 && std::abs(right_last - right_target) <= tolerance_pulse_);
-        left_stable = left_in_tolerance ? left_stable + 1 : 0;
-        right_stable = right_in_tolerance ? right_stable + 1 : 0;
-        const bool left_reached = left_stable >= stable_samples_;
-        const bool right_reached = right_stable >= stable_samples_;
-        publish_feedback(goal_handle, left_last, right_last, left_reached, right_reached);
-
-        if (left_reached && right_reached) {
-          result->success = true;
-          result->left_success = goal->command_left;
-          result->right_success = goal->command_right;
-          result->left_pulse = left_last;
-          result->right_pulse = right_last;
-          result->message = "enabled grippers reached their calibrated targets";
-          goal_handle->succeed(result);
-          return;
-        }
-        std::this_thread::sleep_for(poll_period);
+      if (!interruptible_wait(goal_handle, std::chrono::milliseconds(goal->duration_ms))) {
+        finish_canceled(goal_handle, result);
+        return;
       }
 
-      stop_enabled(goal->command_left, goal->command_right);
-      result->success = false;
-      result->left_success = !goal->command_left || left_stable >= stable_samples_;
-      result->right_success = !goal->command_right || right_stable >= stable_samples_;
-      result->left_pulse = left_last;
-      result->right_pulse = right_last;
-      result->message = "position feedback did not reach target before timeout; stop sent";
-      goal_handle->abort(result);
+      result->success = true;
+      result->left_success = goal->command_left;
+      result->right_success = goal->command_right;
+      result->message = "enabled register writes acknowledged; settling interval completed";
+      publish_feedback(
+        goal_handle, goal->left_position, goal->right_position,
+        goal->command_left, goal->command_right);
+      goal_handle->succeed(result);
     } catch (const std::exception & ex) {
-      try {
-        stop_enabled(goal->command_left, goal->command_right);
-      } catch (const std::exception & stop_ex) {
-        RCLCPP_ERROR(get_logger(), "failed to stop grippers after error: %s", stop_ex.what());
-      }
       result->success = false;
-      result->message = std::string("gripper I/O failed: ") + ex.what();
+      result->left_success = false;
+      result->right_success = false;
+      result->message = std::string("gripper Modbus I/O failed: ") + ex.what();
       RCLCPP_ERROR(get_logger(), "%s", result->message.c_str());
       goal_handle->abort(result);
     }
   }
 
   std::string device_;
-  int baud_rate_{115200};
+  int baud_rate_{9600};
+  char parity_{'N'};
+  int data_bits_{8};
+  int stop_bits_{1};
+  int response_timeout_ms_{1000};
+  int slave_id_{4};
+  int left_register_{2};
+  int right_register_{1};
+  int left_open_value_{25};
+  int left_closed_value_{60};
+  int right_open_value_{25};
+  int right_closed_value_{40};
+  int write_repeats_{2};
+  int write_delay_ms_{500};
   bool allow_motion_{false};
   bool mock_hardware_{false};
-  int left_id_{1};
-  int right_id_{2};
-  int left_open_pulse_{1450};
-  int left_closed_pulse_{1550};
-  int right_open_pulse_{1450};
-  int right_closed_pulse_{1550};
-  int read_timeout_ms_{120};
-  double poll_hz_{10.0};
-  int tolerance_pulse_{20};
-  int stable_samples_{2};
-  double goal_timeout_sec_{5.0};
 
-  SerialBus serial_;
+  ModbusRtuBus bus_;
   rclcpp_action::Server<Command>::SharedPtr action_server_;
   std::mutex goal_mutex_;
   bool busy_{false};
   std::atomic<bool> cancel_requested_{false};
+  std::mutex worker_mutex_;
+  std::thread worker_;
 };
 
 }  // namespace double_arm_end_effector

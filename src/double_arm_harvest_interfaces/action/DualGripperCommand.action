@@ -1,6 +1,6 @@
 # Normalized gripper command. 0.0 is the calibrated open position and 1.0 is
-# the calibrated closed position. Both enabled servos are started by one write
-# on the shared half-duplex bus.
+# the calibrated closed position. Each enabled side is written to its configured
+# slave/register endpoint on the shared RS485 Modbus RTU bus.
 bool command_left
 bool command_right
 float32 left_position
@@ -10,6 +10,7 @@ uint32 duration_ms
 bool success
 bool left_success
 bool right_success
+# Kept for API compatibility; these fields now contain raw Modbus values.
 int32 left_pulse
 int32 right_pulse
 string message

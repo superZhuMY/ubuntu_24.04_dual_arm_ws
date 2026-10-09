@@ -14,7 +14,7 @@ src/
   double_arm_sparse_execution/    STM32 关键段执行 + 终点反馈确认（保留旧稀疏模式）
   double_arm_harvest_interfaces/  双臂采摘与双夹爪 Action 接口
   double_arm_harvest_execution/   双臂采摘状态机 + MoveIt/夹爪同步屏障
-  double_arm_end_effector/        Type-C USB/TTL 单总线双舵机夹爪驱动
+  double_arm_end_effector/        RS485 Modbus RTU 双夹爪驱动
   double_arm_robot/               URDF/xacro、mesh、显示 launch
   double_arm_robot_moveit_config/ SRDF、kinematics、控制器 YAML、全部 launch
   double_arm_jaka_interfaces/     自定义 msg/srv/action
