@@ -8,9 +8,10 @@ install(
     config
     launch
     meshes
-    textures
     urdf
   DESTINATION share/${PROJECT_NAME}
 )
+
+install(DIRECTORY textures DESTINATION share/${PROJECT_NAME} OPTIONAL)
 
 ament_package()

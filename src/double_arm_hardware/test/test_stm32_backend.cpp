@@ -11,6 +11,7 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <future>
 #include <memory>
 #include <stdexcept>
 #include <thread>
@@ -27,15 +28,40 @@ using namespace std::chrono_literals;
 namespace
 {
 
+// Pause after writing the first TARGET, before the transport consumes its ACK.
+// This creates an in-flight transaction without injecting a communication timeout.
+class InFlightTargetSerial : public MockStm32Serial
+{
+public:
+  std::promise<void> target_written;
+  std::promise<void> release_target;
+
+  int write_raw(const std::vector<uint8_t> & data) override
+  {
+    const int result = MockStm32Serial::write_raw(data);
+    if (!paused_ && data.size() >= 8U && data[3] == Stm32Protocol::CMD_TARGET) {
+      paused_ = true;
+      target_written.set_value();
+      release_future_.wait_for(5s);
+    }
+    return result;
+  }
+
+private:
+  std::future<void> release_future_ = release_target.get_future();
+  bool paused_ = false;
+};
+
 struct BF
 {
   MockStm32Serial * mock = nullptr;
   std::shared_ptr<Stm32Transport> tr;
   std::shared_ptr<Stm32Backend> be;
 
-  explicit BF(bool gate = true, Stm32Backend::Timeouts t = Stm32Backend::Timeouts{})
+  explicit BF(bool gate = true, Stm32Backend::Timeouts t = Stm32Backend::Timeouts{},
+              std::unique_ptr<MockStm32Serial> s = nullptr)
   {
-    auto s = std::make_unique<MockStm32Serial>();
+    if (!s) s = std::make_unique<MockStm32Serial>();
     mock = s.get();
     tr = std::make_shared<Stm32Transport>(std::move(s));
     tr->configure("/dev/ttyUSB0", 115200, t.target_ack_ms, t.state_ms,
@@ -343,30 +369,32 @@ TEST(Stm32BackendWrite, UnchangedIntegerTargetIsNotResent)
 
 TEST(Stm32BackendWrite, InFlightSnapshotNotMutated)
 {
-  BF f;
+  auto serial = std::make_unique<InFlightTargetSerial>();
+  auto * in_flight = serial.get();
+  auto target_written = in_flight->target_written.get_future();
+  BF f(true, Stm32Backend::Timeouts{}, std::move(serial));
   f.connect_ok();
   std::array<int32_t, 12> pos{};
   f.full_valid(pos);
   ASSERT_TRUE(f.be->wait_all_valid(2000));   // seed the healthy link
   f.open_gate();
 
-  // Round 1: mark a target and keep the response in flight (250 ms delay)
+  // Round 1: mark a target and pause after the first frame is written
   // while a NEW target arrives — the in-flight frame must keep its own
   // snapshot; only the next round picks up the new value.
   std::array<double, 12> a{};
   a[0] = 1.0;   // L_J1 = 1 m → 1,000,000 µm
   f.be->write_targets(a);
 
-  f.mock->set_response_delay_ms(250);
   std::thread t1([&]() { f.be->service_step(); });
 
-  std::this_thread::sleep_for(100ms);
+  EXPECT_EQ(target_written.wait_for(2s), std::future_status::ready);
   std::array<double, 12> b{};
   b[0] = 2.0;   // L_J1 = 2 m → 2,000,000 µm
-  f.be->write_targets(b);
+  EXPECT_TRUE(f.be->write_targets(b));
 
+  in_flight->release_target.set_value();
   t1.join();
-  f.mock->set_response_delay_ms(0);
   f.be->service_step();   // round 2
 
   // TARGET frames in order: round-1 L (snapshot A) and R, then round-2 L
@@ -381,6 +409,10 @@ TEST(Stm32BackendWrite, InFlightSnapshotNotMutated)
   EXPECT_EQ(targets[2].arm, 0);
   EXPECT_EQ(targets[2].joint[0], 2000000)
     << "Round-2 sends the newest target B";
+  const auto stats = f.be->stats();
+  EXPECT_EQ(stats.target_timeout[0], 0u);
+  EXPECT_EQ(stats.target_timeout[1], 0u);
+  EXPECT_EQ(stats.state_timeout, 0u);
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -902,4 +934,37 @@ TEST(Stm32BackendTarget, RetriesLatestTargetAfterBusy)
   const auto after = collect_targets(f.mock->sent_frames()).size();
   f.be->service_step();
   EXPECT_EQ(collect_targets(f.mock->sent_frames()).size(), after);
+}
+
+TEST(Stm32BackendTarget, RetriesLatestTargetAfterAckTimeout)
+{
+  Stm32Backend::Timeouts timeouts;
+  timeouts.target_ack_ms = 20;
+  BF f(true, timeouts);
+  f.connect_ok();
+  f.full_valid({});
+  ASSERT_TRUE(f.be->wait_all_valid(2000));
+  f.open_gate();
+  std::array<double, 12> target{};
+  target[0] = 0.01;
+  f.mock->set_no_ack_response(true);
+  ASSERT_TRUE(f.be->write_targets(target));
+  f.be->service_step();
+  ASSERT_EQ(f.be->stats().target_timeout[0], 1u);
+  ASSERT_EQ(f.be->stats().target_timeout[1], 1u);
+
+  target[0] = 0.02;
+  ASSERT_TRUE(f.be->write_targets(target));
+  f.mock->set_no_ack_response(false);
+  f.be->service_step();
+  const auto sent = collect_targets(f.mock->sent_frames());
+  ASSERT_EQ(sent.size(), 4u);
+  EXPECT_EQ(sent[0].joint[0], 10000);
+  EXPECT_EQ(sent[2].arm, 0);
+  EXPECT_EQ(sent[2].joint[0], 20000);
+  EXPECT_EQ(sent[3].arm, 1);
+  EXPECT_EQ(f.be->stats().target_ack_ok[0], 1u);
+  EXPECT_EQ(f.be->stats().target_ack_ok[1], 1u);
+  f.be->service_step();
+  EXPECT_EQ(collect_targets(f.mock->sent_frames()).size(), 4u);
 }
