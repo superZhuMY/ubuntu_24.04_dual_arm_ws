@@ -1,0 +1,31 @@
+dual_gripper_controller:
+  ros__parameters:
+    # Legacy RS485 Modbus RTU bus. Persistent udev alias (socket 1-2.2.2);
+    # do not use /dev/ttyUSBx, whose number drifts on replug/power cycling.
+    device: /dev/tcp_gripper
+    baud_rate: 9600
+    parity: "N"
+    data_bits: 8
+    stop_bits: 1
+    response_timeout_ms: 1000
+
+    # Both grippers use slave 4. Their holding-register addresses distinguish
+    # the endpoints: left=2 and right=1.
+    slave_id: 4
+    left_register: 2
+    right_register: 1
+
+    # Values used by the old RS485 driver. The normalized Action input maps
+    # 0.0 to open and 1.0 to closed independently for each gripper.
+    left_open_value: 40
+    left_closed_value: 60
+    right_open_value: 25
+    right_closed_value: 40
+
+    # Preserve the old driver's repeated-write behavior.
+    write_repeats: 2
+    write_delay_ms: 500
+
+    # Real motion stays locked until explicitly enabled.
+    allow_motion: false
+    mock_hardware: false

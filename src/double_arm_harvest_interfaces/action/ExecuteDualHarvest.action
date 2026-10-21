@@ -1,0 +1,29 @@
+# Request one coordinated dual-arm harvest task.
+#
+# Stage flow: APPROACH -> PICK -> RETREAT -> HOME (v1; END_EFFECTOR/PLACE/
+# RELEASE stages are reserved but skipped unless enabled in config).
+#
+# Either arm may be disabled for split verification; the enabled arms of every
+# stage are planned together, dispatched with one shared start time, and must
+# all succeed before the next stage starts.
+# Goal
+double_arm_harvest_interfaces/HarvestTarget left_target
+double_arm_harvest_interfaces/HarvestTarget right_target
+bool execute_left
+bool execute_right
+---
+# Result
+bool success
+bool left_success
+bool right_success
+# Stage name of the first failure, e.g. "APPROACH"; empty on success
+string failed_stage
+string message
+---
+# Feedback
+string left_stage
+string right_stage
+# Fraction of enabled motion stages completed for that arm, [0, 1]
+float32 left_progress
+float32 right_progress
+string message

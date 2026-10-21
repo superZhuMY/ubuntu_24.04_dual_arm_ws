@@ -1,0 +1,24 @@
+# Manual harvest targets for send_manual_harvest_goal.py.
+#
+# The executor uses each manual pose as the final pick TCP pose. APPROACH is
+# derived by subtracting the configured J3 stroke, then one IK solution is
+# computed from the current joint state. No random IK probing is performed.
+#
+# They are NOT calibrated harvest points and must never be sent to real
+# hardware as-is. Replace both arms with measured, safe targets before an
+# STM32 run.
+left:
+  target_id: left_test_001
+  frame_id: base_link
+  position: [0.16553, 0.53469, 0.34786]
+  orientation: [-0.17307, 0.014284, 0.080764, 0.98149]
+  confidence: 1.0
+  source: manual_yaml
+
+right:
+  target_id: right_test_001
+  frame_id: base_link
+  position: [0.49515, 0.52042, 0.20029]
+  orientation: [-0.26652, 0.35778, -0.085306, 0.89089]
+  confidence: 1.0
+  source: manual_yaml
