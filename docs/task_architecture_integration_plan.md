@@ -146,7 +146,7 @@ For every execution-fault row, assert that only allowed cancellation/hold operat
 - [x] Verify 454c4b5 and 68b955d remain ancestors of the final integration commit and proposed main. Rerun both executor shutdown/SIGINT cases, InFlightSnapshotNotMutated, RetriesLatestTargetAfterAckTimeout, and clean install without textures; check an available textures directory is still installed. These are behavior checks, not source-text equality checks.
 - [x] Obtain an independent whole-change review; fix substantive findings with regression tests and rerun affected checks.
 - [x] Verify input workspaces remain unchanged, diff has no conflict markers/whitespace errors, and the integration branch is committed and clean.
-- [ ] Merge the verified integration into local main; preserve source branches/worktrees and report the final commit and test evidence. Do not push until separately authorized.
+- [x] Merge the verified integration into local main; preserve source branches/worktrees and report the final commit and test evidence. Do not push until separately authorized.
 
 **Acceptance:** Clean build and automated checks pass, review has no unresolved substantive findings, and local main contains the integrated changes. Physical robot execution and recalibration are explicitly unverified.
 
@@ -157,3 +157,5 @@ Both input snapshots were merged incrementally (hardware `0ad6113`, refactor `a4
 A fresh archive of the staged Git tree built all 9 packages with ROS 2 Jazzy and system Python. The complete sequential colcon run finished in 5m31s; `colcon test-result --verbose` reports **443 tests, 0 errors, 0 failures, 0 skipped**. This includes 15 hardware targets, the new/legacy task flows, 34 recovery fault subcases (each followed by a successful full task), effective hardware launch parameters and CLI pause handling. Both task and streaming executor processes exited cleanly during launch teardown. MoveIt's external move_group required launch teardown SIGTERM; no change to that dependency was made.
 
 The clean build/install succeeded without textures; a separate fixture containing a texture marker installed it successfully. Both original indexes and all 404 selected source file hashes remained unchanged. Commits `454c4b5` and `68b955d` remain ancestors. Physical execution, physical stopping and recalibration remain unverified. No remote push is part of this execution.
+
+Local main was fast-forwarded to verified integration commit `0f04208`. Source branches and worktrees were retained; no push was performed.
