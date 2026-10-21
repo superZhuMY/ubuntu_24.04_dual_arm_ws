@@ -17,6 +17,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -26,6 +27,7 @@
 #include <control_msgs/action/follow_joint_trajectory.hpp>
 #include <double_arm_harvest_interfaces/action/dual_gripper_command.hpp>
 #include <double_arm_harvest_interfaces/action/execute_dual_harvest.hpp>
+#include <double_arm_harvest_interfaces/action/execute_task.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
@@ -33,9 +35,13 @@
 #include <trajectory_msgs/msg/joint_trajectory.hpp>
 
 #include "double_arm_harvest_execution/failure_policy.hpp"
+#include "double_arm_harvest_execution/gripper_skill.hpp"
 #include "double_arm_harvest_execution/pose_utils.hpp"
 #include "double_arm_harvest_execution/stage_barrier.hpp"
 #include "double_arm_harvest_execution/trajectory_dispatcher.hpp"
+#include "double_arm_harvest_execution/motion_skill.hpp"
+#include "double_arm_harvest_execution/task_request.hpp"
+#include "double_arm_harvest_execution/task_behavior.hpp"
 
 namespace moveit
 {
@@ -53,14 +59,6 @@ class TransformListener;
 
 namespace double_arm_harvest_execution
 {
-
-/// Result of planning one arm for one stage.
-struct ArmStagePlan
-{
-  bool success{false};
-  std::string error;
-  trajectory_msgs::msg::JointTrajectory trajectory;
-};
 
 /// Task-level state machine stages (plan doc 8.1).
 enum class Stage
@@ -80,17 +78,20 @@ std::string stage_name(Stage stage);
 /// Stages that actually move an arm and go through the dispatch barrier.
 bool is_motion_stage(Stage stage);
 
-class DualHarvestExecutor : public rclcpp::Node
+class TaskExecutor : public rclcpp::Node
 {
 public:
   using ExecuteDualHarvest = double_arm_harvest_interfaces::action::ExecuteDualHarvest;
+  using ExecuteTask = double_arm_harvest_interfaces::action::ExecuteTask;
   using HarvestGoal = ExecuteDualHarvest::Goal;
+  using TaskGoal = ExecuteTask::Goal;
   using GoalHandleHarvest = rclcpp_action::ServerGoalHandle<ExecuteDualHarvest>;
+  using GoalHandleTask = rclcpp_action::ServerGoalHandle<ExecuteTask>;
   using FollowJointTrajectory = control_msgs::action::FollowJointTrajectory;
   using DualGripperCommand = double_arm_harvest_interfaces::action::DualGripperCommand;
 
-  explicit DualHarvestExecutor(const rclcpp::NodeOptions & options);
-  ~DualHarvestExecutor() override;
+  explicit TaskExecutor(const rclcpp::NodeOptions & options);
+  ~TaskExecutor() override;
 
   /// Construct the two MoveGroupInterfaces. Called from main() after the node
   /// is being spun, because MoveGroupInterface needs its node served while it
@@ -98,48 +99,50 @@ public:
   void init_move_groups();
 
 private:
+  enum class GoalTermination { SUCCEEDED, ABORTED, CANCELED };
+  struct GoalCallbacks
+  {
+    std::function<bool()> is_active;
+    std::function<void(const ExecuteTask::Feedback &)> publish_feedback;
+    std::function<void(const ExecuteTask::Result &, GoalTermination)> finish;
+  };
+
   template<typename T>
   T get_or_declare(const std::string & name, const T & default_value);
 
   std::array<double, 3> get_offset_param(const std::string & name);
 
   // ---- action server callbacks ----
-  rclcpp_action::GoalResponse on_goal(
+  rclcpp_action::GoalResponse on_legacy_goal(
     const rclcpp_action::GoalUUID & uuid,
     std::shared_ptr<const HarvestGoal> goal);
-  rclcpp_action::CancelResponse on_cancel(
+  rclcpp_action::GoalResponse on_task_goal(
+    const rclcpp_action::GoalUUID & uuid,
+    std::shared_ptr<const TaskGoal> goal);
+  rclcpp_action::CancelResponse on_legacy_cancel(
     const std::shared_ptr<GoalHandleHarvest> goal_handle);
-  void on_accepted(const std::shared_ptr<GoalHandleHarvest> goal_handle);
+  rclcpp_action::CancelResponse on_task_cancel(
+    const std::shared_ptr<GoalHandleTask> goal_handle);
+  void on_legacy_accepted(const std::shared_ptr<GoalHandleHarvest> goal_handle);
+  void on_task_accepted(const std::shared_ptr<GoalHandleTask> goal_handle);
+  rclcpp_action::GoalResponse accept_request(const TaskRequest & request);
+  void request_cancel();
 
   // ---- task execution ----
   void execute(const std::shared_ptr<GoalHandleHarvest> goal_handle);
+  void execute(const std::shared_ptr<GoalHandleTask> goal_handle);
+  void execute_request(const TaskRequest & request, const GoalCallbacks & callbacks);
+  TaskRequest convert_legacy_goal(const HarvestGoal & goal);
+  TaskRequest convert_task_goal(const TaskGoal & goal);
 
   /// Returns the validation error for one target, or nullopt when valid.
   std::optional<std::string> validate_target(
-    const double_arm_harvest_interfaces::msg::HarvestTarget & target,
+    const double_arm_harvest_interfaces::msg::TaskTarget & target,
     const std::string & arm_side) const;
 
   /// True when /joint_states is fresh and contains every required joint.
   bool joint_states_ready(
     const std::vector<std::string> & required_joints, std::string * error) const;
-
-  /// Generate an approach pose by applying a base-frame offset to the manual
-  /// pick pose.
-  geometry_msgs::msg::PoseStamped stage_target_pose_base(
-    const double_arm_harvest_interfaces::msg::HarvestTarget & target,
-    const std::array<double, 3> & base_offset) const;
-
-  ArmStagePlan plan_arm_pose(
-    moveit::planning_interface::MoveGroupInterface & arm,
-    const geometry_msgs::msg::PoseStamped & target_base_frame);
-  ArmStagePlan plan_arm_named(
-    moveit::planning_interface::MoveGroupInterface & arm,
-    const std::string & named_target);
-
-  /// Plan from the current state while changing only the prismatic J3 target.
-  /// Positive delta extends to the manual pick point; negative delta retracts.
-  ArmStagePlan plan_arm_j3_delta(
-    moveit::planning_interface::MoveGroupInterface & arm, double delta);
 
   /// Dispatch both trajectories with one shared start time and wait until the
   /// stage barrier reaches a final verdict. Returns true when the stage may
@@ -160,7 +163,8 @@ private:
   void cancel_outstanding_arms();
 
   void publish_stage_feedback(
-    const std::shared_ptr<GoalHandleHarvest> & goal_handle,
+    const GoalCallbacks & callbacks,
+    const std::string & task_id,
     const std::string & left_stage,
     const std::string & right_stage,
     float left_progress,
@@ -185,6 +189,8 @@ private:
   double goal_accept_timeout_sec_{3.0};
   double stage_timeout_sec_{30.0};
   double cancel_timeout_sec_{3.0};
+  bool allow_task_motion_{false};
+  TaskType legacy_task_type_{TaskType::TOMATO_PICK};
   std::string gripper_action_name_;
   double gripper_open_position_{0.0};
   double gripper_close_position_{1.0};
@@ -195,16 +201,13 @@ private:
   double j3_stroke_tolerance_{0.005};
   std::array<double, 3> left_j3_extend_axis_{};
   std::array<double, 3> right_j3_extend_axis_{};
-  /// "tomato_pick" (default, unchanged) or "leaf". In leaf mode the RETREAT
-  /// stage is staggered: right arm retracts first, left arm retracts after
-  /// leaf_left_retreat_delay_sec (keeps the left gripper on the fruit longer).
-  std::string task_mode_{"tomato_pick"};
   double leaf_left_retreat_delay_sec_{3.0};
   double leaf_right_retreat_delay_sec_{0.0};
 
   // ---- moveit / tf ----
   std::unique_ptr<moveit::planning_interface::MoveGroupInterface> left_arm_;
   std::unique_ptr<moveit::planning_interface::MoveGroupInterface> right_arm_;
+  std::unique_ptr<MotionSkill> motion_skill_;
   std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
   std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
   std::string planning_frame_;
@@ -216,11 +219,17 @@ private:
   rclcpp::CallbackGroup::SharedPtr fjt_cb_group_;
   rclcpp::CallbackGroup::SharedPtr gripper_cb_group_;
   rclcpp_action::Server<ExecuteDualHarvest>::SharedPtr action_server_;
+  rclcpp_action::Server<ExecuteTask>::SharedPtr task_action_server_;
   rclcpp_action::Client<DualGripperCommand>::SharedPtr gripper_client_;
+  std::unique_ptr<GripperSkill> gripper_skill_;
   std::shared_ptr<TrajectoryDispatcher> dispatcher_;
   std::mutex goal_gate_mutex_;
   bool busy_{false};
   std::atomic<bool> cancel_requested_{false};
+  std::atomic<bool> recovery_required_{false};
+  std::shared_ptr<std::atomic<bool>> gripper_recovery_required_{
+    std::make_shared<std::atomic<bool>>(false)};
+  std::atomic<uint64_t> legacy_task_counter_{0};
   TargetLedger target_ledger_;
 
   // ---- stage barrier / dispatch synchronisation ----
@@ -240,12 +249,8 @@ private:
   // ---- live feedback state ----
   rclcpp::TimerBase::SharedPtr feedback_timer_;
   mutable std::mutex feedback_state_mutex_;
-  std::shared_ptr<GoalHandleHarvest> active_goal_;
-  std::string feedback_left_stage_;
-  std::string feedback_right_stage_;
-  float feedback_left_progress_{0.0f};
-  float feedback_right_progress_{0.0f};
-  std::string feedback_message_;
+  std::function<void(const ExecuteTask::Feedback &)> active_feedback_publisher_;
+  ExecuteTask::Feedback latest_feedback_;
 };
 
 }  // namespace double_arm_harvest_execution
