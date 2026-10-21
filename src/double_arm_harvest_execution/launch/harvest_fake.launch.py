@@ -29,20 +29,8 @@ import os
 import tempfile
 
 import yaml
-from ament_index_python.packages import get_package_share_directory
 
 NODE_NAME = "dual_arm_harvest_executor"
-
-
-def _harvest_motion_default(key, fallback):
-    """Read a default from harvest_motion.yaml so the YAML stays the source."""
-    path = os.path.join(
-        get_package_share_directory("double_arm_harvest_execution"),
-        "config", "harvest_motion.yaml")
-    with open(path, encoding="utf-8") as handle:
-        params = yaml.safe_load(handle)[NODE_NAME]["ros__parameters"]
-    return str(params.get(key, fallback))
-
 
 def _node_override(**params):
     """Write a node-specific override file.
@@ -61,8 +49,6 @@ def _node_override(**params):
 def generate_launch_description():
     args = {
         "start_rviz": ("false", ["true", "false"]),
-        "task_mode": (_harvest_motion_default("task_mode", "tomato_pick"),
-                      ["tomato_pick", "leaf"]),
     }
     decls = []
     lcs = {}
@@ -116,8 +102,7 @@ def generate_launch_description():
     ]
 
     def _harvest_node(context):
-        override = _node_override(
-            task_mode=LaunchConfiguration("task_mode").perform(context))
+        override = _node_override(allow_task_motion=True)
         return [Node(
             package="double_arm_harvest_execution",
             executable="dual_arm_harvest_executor",

@@ -56,6 +56,9 @@ public:
   /// True once the verdict is final (anything other than WAIT).
   bool finished() const;
 
+  /// True once every enabled arm has answered the goal acceptance request.
+  bool all_goal_responses_received() const;
+
   /// Single decision point. Idempotent: the first non-WAIT verdict latches.
   /// (Non-const: observing the barrier latches the first final verdict.)
   Verdict verdict();
@@ -74,6 +77,8 @@ private:
 
   bool left_rejected_{false};
   bool right_rejected_{false};
+  bool left_response_received_{false};
+  bool right_response_received_{false};
   bool left_finished_{false};
   bool right_finished_{false};
   bool left_success_{false};

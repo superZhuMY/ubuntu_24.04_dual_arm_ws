@@ -42,6 +42,10 @@ set(HARVEST_DEPS
 add_library(harvest_core STATIC
   src/pose_utils.cpp
   src/failure_policy.cpp
+  src/task_request.cpp
+  src/task_behavior.cpp
+  src/motion_skill.cpp
+  src/gripper_skill.cpp
   src/stage_barrier.cpp
   src/trajectory_dispatcher.cpp
   src/dual_harvest_executor.cpp
@@ -63,6 +67,7 @@ install(PROGRAMS scripts/send_manual_harvest_goal.py
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
+  find_package(ament_cmake_pytest REQUIRED)
 
   ament_add_gtest(test_pose_utils test/test_pose_utils.cpp)
   target_include_directories(test_pose_utils PRIVATE include)
@@ -84,6 +89,23 @@ if(BUILD_TESTING)
   ament_add_gtest(test_failure_policy test/test_failure_policy.cpp)
   target_include_directories(test_failure_policy PRIVATE include)
   target_link_libraries(test_failure_policy harvest_core)
+
+  ament_add_gtest(test_execute_task_schema test/test_execute_task_schema.cpp)
+  ament_target_dependencies(test_execute_task_schema double_arm_harvest_interfaces)
+
+  ament_add_gtest(test_task_request test/test_task_request.cpp)
+  target_include_directories(test_task_request PRIVATE include)
+  target_link_libraries(test_task_request harvest_core)
+
+  ament_add_gtest(test_task_behavior test/test_task_behavior.cpp)
+  target_include_directories(test_task_behavior PRIVATE include)
+  target_link_libraries(test_task_behavior harvest_core)
+
+  ament_add_pytest_test(test_manual_target_conversion test/test_manual_target_conversion.py)
+
+  ament_add_gtest(test_gripper_skill test/test_gripper_skill.cpp)
+  target_include_directories(test_gripper_skill PRIVATE include)
+  target_link_libraries(test_gripper_skill harvest_core)
 
   find_package(launch_testing_ament_cmake REQUIRED)
   add_launch_test(test/test_fake_harvest_integration.py TIMEOUT "600")

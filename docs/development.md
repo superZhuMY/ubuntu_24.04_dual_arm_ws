@@ -4,7 +4,9 @@
 
 [项目总览](project_overview.md) · [系统架构](architecture.md) · [接口与配置](interfaces_and_config.md) · [开发与排障](development.md)
 
-资料基线：2026-10-09，ROS 仓库 `9c00aa3`。本次仅核对文档与源码，未重新构建或验证现场硬件。源码路径以工作区根目录为基准；包内简称需结合所属包定位。
+历史资料基线：2026-10-09，ROS 仓库 `9c00aa3`。本页后续新增记录按各自日期描述；源码路径以工作区根目录为基准，包内简称需结合所属包定位。
+
+任务驱动重构记录：2026-10-20，基于 `feature/dual-arm-gripper-integration` 的提交 `8f0462c`，在 `refactor/task-driven-architecture` 实施。7 个受影响包构建成功。执行包完整 CTest 套件 11/11、bringup 1/1 通过；随后对角色策略、人工目标转换和统一 fake 集成做回归，3/3 通过。JUnit 记录 54 个执行包断言和 3 个启动配置断言，0 失败。fake 测试覆盖同会话 tomato → leaf → tomato、左右单臂、双臂、冲突拒绝、取消、规划失败后恢复。fake 测试结束时 `move_group` 未在 SIGINT 后 5 秒内退出，launch 随后发 SIGTERM；任务断言通过，退出清理仍需追查。未连接真机，本次不代表 STM32、真实夹爪或实体安全验证通过。
 
 ## 1. 构建、测试与启动
 
@@ -40,7 +42,7 @@ colcon test-result --all
 ```bash
 source /opt/ros/jazzy/setup.bash
 source install/setup.bash
-ros2 launch double_arm_harvest_execution harvest_fake.launch.py start_rviz:=true
+ros2 launch double_arm_bringup robot.launch.py mode:=fake start_rviz:=true
 ```
 
 等待 `move groups ready` 后，在另一个已 source 环境的终端运行：
@@ -49,7 +51,7 @@ ros2 launch double_arm_harvest_execution harvest_fake.launch.py start_rviz:=true
 ros2 run double_arm_harvest_execution send_manual_harvest_goal.py --timeout 240
 ```
 
-发送脚本默认读取包内 `manual_targets.yaml`，可用 `--config` 指定替代文件，`--no-left` / `--no-right` 做单臂验证。leaf 演示在启动时加 `task_mode:=leaf`。当前 fake 入口固定启用完整流程与 mock 夹爪，没有 `plan_only`、`dry_run` 或自动发目标选项。
+发送脚本默认读取包内 `manual_targets.yaml`，可用 `--config` 指定替代文件；`--no-left` / `--no-right` 做单臂验证，`--task-type leaf_remove` 在运行时选择打叶。fake 入口固定启用完整流程与 mock 夹爪，没有 `plan_only`、`dry_run` 或自动发目标选项。
 
 ### 1.4 真机入口的区别
 
@@ -58,10 +60,10 @@ ros2 run double_arm_harvest_execution send_manual_harvest_goal.py --timeout 240
 | `double_arm_hardware readonly_check` | direct_motor 只读诊断 |
 | `f2_stm32_readonly.launch.py` | STM32 只读状态链路 |
 | `e3_hold.launch.py`、`e4_home.launch.py`、`e5_moveit.launch.py` | direct_motor 保持、分步回零和 MoveIt 测试 |
-| `stm32_moveit.launch.py` | STM32 MoveIt；默认 real、非只读、允许电机使能 |
-| `harvest_stm32.launch.py` | 上述链路加双臂并发、真实夹爪与采摘执行节点 |
+| `double_arm_bringup robot.launch.py mode:=real` | STM32 MoveIt、真实夹爪与任务执行器；电机和夹爪使能默认关闭 |
+| `harvest_stm32.launch.py` | 保留的内部兼容入口；动作门控默认关闭 |
 
-硬件打开 I/O 的门控为 `enable_hardware && allow_hardware_io`；STM32 运动还需非只读且 `allow_motor_enable`。xacro 在 `hardware_mode=real` 时设置 I/O 门控为 true，不能将“有门控”等同于“启动默认安全只读”。两个 STM32 运动 launch 默认允许使能；采摘真机 launch 还覆盖夹爪 `allow_motion=true`。不发送采摘 goal 也可能已执行电机激活 / 使能通信。
+硬件打开 I/O 的门控为 `enable_hardware && allow_hardware_io`；STM32 运动还需非只读且 `allow_motor_enable`。统一 `real` 入口和 STM32 MoveIt 入口默认禁止电机使能，夹爪 `allow_motion` 默认关闭；任务执行器还要求两个动作使能同时开启。`readonly` 不启动运动控制器、夹爪命令节点或任务执行器。
 
 真机运行需使用现场确认的串口、方向、零偏、限位和 TCP 目标，并按单臂小位移至双臂的顺序验证。具体操作见 [采摘启动说明](harvest_bringup.md) 和 [双夹爪集成说明](dual_gripper_integration.md)，示例 `manual_targets.yaml` 不可直接用于真机。
 
@@ -92,21 +94,21 @@ ros2 run double_arm_harvest_execution send_manual_harvest_goal.py --timeout 240
 
 | 要处理的任务 | 所属目录 | 建议阅读范围 |
 |---|---|---|
-| 采摘时序、leaf 延迟、失败处理 | `src/double_arm_harvest_execution/` | `src/dual_harvest_executor.cpp`、`src/stage_barrier.cpp`、`src/failure_policy.cpp`、`config/harvest_motion.yaml`、`test/` |
+| 任务调度、采摘时序、leaf 延迟、失败处理 | `src/double_arm_harvest_execution/` | `TaskExecutor`（当前位于 `src/dual_harvest_executor.cpp`）、`task_request.*`、`task_behavior.*`、`motion_skill.*`、`gripper_skill.*`、`stage_barrier.cpp`、`failure_policy.cpp`、`test/` |
 | 轨迹不动、段数异常、到位超时 | `src/double_arm_sparse_execution/` | `double_arm_sparse_execution/streaming.py`、`double_arm_sparse_execution/streaming_trajectory_executor.py`、父类 `sparse_trajectory_executor.py`、`config/sparse_execution.yaml` |
 | sparse 混合腕部与碰撞检查 | 同上 | `double_arm_sparse_execution/sparse_filter.py`、`double_arm_sparse_execution/sparse_trajectory_executor.py`、`test/` |
 | 串口、ACK、状态丢帧 | `src/double_arm_hardware/` | `include/double_arm_hardware/stm32_protocol.hpp`、`stm32_stream_parser.hpp`、`stm32_transport.hpp`、`src/stm32_system_hardware.cpp` |
 | 方向、比例、零位与差动 | 同上及 `AIMotor_F407_Demo_v2/` | `include/double_arm_hardware/motor_converter.hpp`、`stm32_backend.hpp`、URDF / xacro、E5 报告；固件 `App/Src/mwmotor.c` |
 | 夹爪不动作或映射错误 | `src/double_arm_end_effector/` | `src/dual_gripper_controller.cpp`、`src/modbus_rtu_bus.cpp`、`src/gripper_mapping.cpp`、`config/dual_gripper.yaml` 与集成说明 |
 | IK、规划组、HOME 或关节限位 | `src/double_arm_robot/`、`src/double_arm_robot_moveit_config/` | URDF、SRDF、`config/kinematics.yaml`、`config/joint_limits.yaml`；采摘包 `src/pose_utils.cpp` |
-| launch 参数覆盖或控制器不匹配 | `src/double_arm_harvest_execution/`、`src/double_arm_robot_moveit_config/` | `launch/harvest_*.launch.py`、`launch/stm32_moveit.launch.py`、xacro、MoveIt / ros2_control YAML |
-| 视觉接入 | `docs/vision_pipeline/`、`src/double_arm_harvest_interfaces/` | 视觉 `README.md`、`MANIFEST.md`、坐标约定；接口 `msg/HarvestTarget.msg`、`action/ExecuteDualHarvest.action` |
+| launch 参数覆盖或控制器不匹配 | `src/double_arm_bringup/`、`src/double_arm_harvest_execution/`、`src/double_arm_robot_moveit_config/` | `launch/robot.launch.py`、兼容用 `launch/harvest_*.launch.py`、`launch/stm32_moveit.launch.py`、xacro、MoveIt / ros2_control YAML |
+| 视觉接入 | `docs/vision_pipeline/`、`src/double_arm_harvest_interfaces/` | 视觉 `README.md`、`MANIFEST.md`、坐标约定；接口 `msg/DetectedTarget.msg`、`msg/TaskTarget.msg`、`action/ExecuteTask.action` |
 
 ### 3.1 常见问题定位
 
 | 现象 | 首先核对 |
 |---|---|
-| 发送采摘 goal 立即被拒绝 | `move groups ready`、busy 日志、两个 ID 是否非空且不同、是否禁用了双臂 |
+| 发送任务 goal 立即被拒绝 | `move groups ready`、任务是否正在运行、`allow_task_motion`、启用臂 ID、是否至少启用一臂及其角色是否受支持 |
 | APPROACH 规划失败 | TCP 是否在 `base_link` 下、四元数、当前反馈、J3 接近点、IK 和限位 |
 | 收到轨迹但机器人不动 | 控制器是否 active、执行模式是否一致、后端健康状态、使能门控、ACK 和状态新鲜度 |
 | 普通点到点轨迹被分成很多段 | 原始关节轨迹是否反转、XYZ 是否存在拐点、关键段提取参数；先查轨迹形状 |

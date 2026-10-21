@@ -12,6 +12,8 @@ void StageBarrier::reset(bool left_enabled, bool right_enabled)
   right_enabled_ = right_enabled;
   left_rejected_ = false;
   right_rejected_ = false;
+  left_response_received_ = false;
+  right_response_received_ = false;
   left_finished_ = false;
   right_finished_ = false;
   left_success_ = false;
@@ -28,8 +30,10 @@ void StageBarrier::on_goal_response(Side side, bool accepted)
   std::lock_guard<std::mutex> lock(mutex_);
   if (side == LEFT) {
     left_rejected_ = !accepted;
+    left_response_received_ = true;
   } else {
     right_rejected_ = !accepted;
+    right_response_received_ = true;
   }
 }
 
@@ -61,6 +65,13 @@ bool StageBarrier::finished() const
 {
   std::lock_guard<std::mutex> lock(mutex_);
   return latched_;
+}
+
+bool StageBarrier::all_goal_responses_received() const
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  return (!left_enabled_ || left_response_received_) &&
+         (!right_enabled_ || right_response_received_);
 }
 
 StageBarrier::Verdict StageBarrier::verdict()

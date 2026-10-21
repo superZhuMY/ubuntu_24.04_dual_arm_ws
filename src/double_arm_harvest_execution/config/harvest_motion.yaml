@@ -23,10 +23,12 @@ dual_arm_harvest_executor:
     # Both trajectories get header.stamp = now + this delay, so the streaming
     # executor starts the two arms at the same scheduled instant.
     sync_start_delay_sec: 0.50
-    # tomato_pick: 现有双臂采摘（默认，行为不变）。
-    # leaf:        打叶采摘，仅错开 RETREAT——右臂先缩 J3，等
-    #              leaf_left_retreat_delay_sec 后左臂再缩，其余阶段与采摘相同。
-    task_mode: tomato_pick
+    # Motion is locked by default. Fake bringup enables this; real bringup
+    # requires both the motor and gripper motion gates to be explicitly true.
+    allow_task_motion: false
+    # Compatibility-only mapping for /execute_dual_harvest. /execute_task
+    # always selects its type from the Action goal.
+    legacy_task_type: tomato_pick
     leaf_left_retreat_delay_sec: 3.0
     leaf_right_retreat_delay_sec: 0.0
     # Time budget for both FollowJointTrajectory goals being accepted.

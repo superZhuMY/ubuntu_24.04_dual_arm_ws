@@ -28,19 +28,9 @@ import os
 import tempfile
 
 import yaml
-from ament_index_python.packages import get_package_share_directory
+from launch_ros.parameter_descriptions import ParameterValue
 
 NODE_NAME = "dual_arm_harvest_executor"
-
-
-def _harvest_motion_default(key, fallback):
-    """Read a default from harvest_motion.yaml so the YAML stays the source."""
-    path = os.path.join(
-        get_package_share_directory("double_arm_harvest_execution"),
-        "config", "harvest_motion.yaml")
-    with open(path, encoding="utf-8") as handle:
-        params = yaml.safe_load(handle)[NODE_NAME]["ros__parameters"]
-    return str(params.get(key, fallback))
 
 
 def _node_override(**params):
@@ -72,12 +62,11 @@ def generate_launch_description():
         # Calibrated on hardware (F.3): J5 of both arms is reversed relative
         # to the URDF; order is L_Joint_1..L_Joint_6,R_Joint_1..R_Joint_6.
         "stm32_joint_directions": ("1,1,1,1,-1,1,1,1,1,1,-1,1", None),
-        "allow_motor_enable": ("true", ["true", "false"]),
+        "allow_motor_enable": ("false", ["true", "false"]),
         "start_rviz": ("true", ["true", "false"]),
         "gripper_device": (
             "/dev/serial/by-path/pci-0000:06:00.3-usb-0:2.2.3:1.0-port0", None),
-        "task_mode": (_harvest_motion_default("task_mode", "tomato_pick"),
-                      ["tomato_pick", "leaf"]),
+        "gripper_allow_motion": ("false", ["true", "false"]),
     }
     decls = []
     lcs = {}
@@ -142,14 +131,15 @@ def generate_launch_description():
             output="screen",
             parameters=[gripper_config, {
                 "device": lcs["gripper_device"],
-                "allow_motion": True,
+                "allow_motion": ParameterValue(lcs["gripper_allow_motion"], value_type=bool),
             }],
         ),
     ]
 
     def _harvest_node(context):
-        override = _node_override(
-            task_mode=LaunchConfiguration("task_mode").perform(context))
+        motor_enabled = LaunchConfiguration("allow_motor_enable").perform(context) == "true"
+        gripper_enabled = LaunchConfiguration("gripper_allow_motion").perform(context) == "true"
+        override = _node_override(allow_task_motion=motor_enabled and gripper_enabled)
         return [Node(
             package="double_arm_harvest_execution",
             executable="dual_arm_harvest_executor",

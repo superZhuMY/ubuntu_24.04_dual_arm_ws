@@ -1,0 +1,30 @@
+# Goal
+string task_id
+string task_type
+double_arm_harvest_interfaces/TaskTarget left_target
+double_arm_harvest_interfaces/TaskTarget right_target
+bool execute_left
+bool execute_right
+string left_role
+string right_role
+---
+# Result
+string task_id
+bool success
+# True only when the full task completed for that enabled arm. False also covers disabled arms.
+bool left_success
+bool right_success
+string failed_stage
+string error_code
+string message
+---
+# Feedback
+string task_id
+string state
+string current_stage
+float32 progress
+string left_stage
+string right_stage
+float32 left_progress
+float32 right_progress
+string message

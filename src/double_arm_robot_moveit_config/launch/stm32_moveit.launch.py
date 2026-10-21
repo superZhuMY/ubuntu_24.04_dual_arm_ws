@@ -47,7 +47,7 @@ def generate_launch_description():
         # to the URDF; order is L_Joint_1..L_Joint_6,R_Joint_1..R_Joint_6.
         "stm32_joint_directions": ("1,1,1,1,-1,1,1,1,1,1,-1,1", None),
         "stm32_read_only": ("false", ["true", "false"]),
-        "allow_motor_enable": ("true", ["true", "false"]),
+        "allow_motor_enable": ("false", ["true", "false"]),
         "start_rviz": ("true", ["true", "false"]),
         # Calibration/sparse default stays false; harvest_stm32.launch.py
         # includes this launch with true to dispatch both arms together.

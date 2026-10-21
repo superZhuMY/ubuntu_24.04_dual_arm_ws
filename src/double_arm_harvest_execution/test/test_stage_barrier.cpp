@@ -35,6 +35,22 @@ TEST(StageBarrier, BothSucceedAdvanceExactlyOnce)
   EXPECT_TRUE(b.finished());
 }
 
+TEST(StageBarrier, TracksGoalAcceptanceResponsesForSeparateTimeout)
+{
+  StageBarrier b;
+  b.reset(true, true);
+  EXPECT_FALSE(b.all_goal_responses_received());
+  b.on_goal_response(StageBarrier::LEFT, true);
+  EXPECT_FALSE(b.all_goal_responses_received());
+  b.on_goal_response(StageBarrier::RIGHT, true);
+  EXPECT_TRUE(b.all_goal_responses_received());
+
+  b.reset(true, false);
+  EXPECT_FALSE(b.all_goal_responses_received());
+  b.on_goal_response(StageBarrier::LEFT, true);
+  EXPECT_TRUE(b.all_goal_responses_received());
+}
+
 TEST(StageBarrier, SingleArmTaskAdvancesOnThatArmOnly)
 {
   StageBarrier b;

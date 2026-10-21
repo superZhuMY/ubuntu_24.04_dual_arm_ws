@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Send one manual ExecuteDualHarvest goal from a YAML file.
+"""Send a unified ExecuteTask goal from manual YAML targets.
 
 The YAML mirrors the old ROS1 manual task workflow: a human-edited file
 provides left/right targets so the execution layer can be exercised before a
@@ -14,8 +14,8 @@ result wait. A canceled, rejected, or timed-out task stops loop mode.
 
 Usage:
   ros2 run double_arm_harvest_execution send_manual_harvest_goal.py \
-      [--config PATH] [--no-left] [--no-right] [--timeout SEC] \
-      [--loop] [--loop-delay SEC]
+      [--config PATH] [--task-type tomato_pick|leaf_remove] \
+      [--no-left] [--no-right] [--timeout SEC] [--loop] [--loop-delay SEC]
 
 Defaults read share/double_arm_harvest_execution/config/manual_targets.yaml.
 """
@@ -24,17 +24,18 @@ import argparse
 import math
 import sys
 import time
+import uuid
 from pathlib import Path
 
 import rclpy
 import yaml
 
-from double_arm_harvest_interfaces.action import ExecuteDualHarvest
-from double_arm_harvest_interfaces.msg import HarvestTarget
+from double_arm_harvest_interfaces.action import ExecuteTask
+from double_arm_harvest_interfaces.msg import TaskTarget
 from rclpy.action import ActionClient
 from rclpy.node import Node
 
-ACTION_NAME = "/execute_dual_harvest"
+ACTION_NAME = "/execute_task"
 DEFAULT_BASE_FRAME = "base_link"
 QUATERNION_NORM_TOLERANCE = 1e-3
 
@@ -70,7 +71,7 @@ def validate_quaternion(values, what):
 
 
 def build_target(section, name, base_frame=DEFAULT_BASE_FRAME):
-    """Validate one YAML target section and return a HarvestTarget."""
+    """Validate one YAML target section and return an executable TCP target."""
     if not isinstance(section, dict):
         raise ValueError(f"{name} section must be a mapping, got {section!r}")
 
@@ -94,46 +95,68 @@ def build_target(section, name, base_frame=DEFAULT_BASE_FRAME):
     if not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
         raise ValueError(f"{name}.confidence must lie in [0, 1], got {confidence}")
 
-    target = HarvestTarget()
+    target_type = str(section.get("target_type", "unknown")).strip()
+    if not target_type:
+        raise ValueError(f"{name}.target_type must be a non-empty string")
+
+    target = TaskTarget()
     target.target_id = target_id
-    target.target_pose.header.frame_id = frame_id
-    target.target_pose.pose.position.x = position[0]
-    target.target_pose.pose.position.y = position[1]
-    target.target_pose.pose.position.z = position[2]
-    target.target_pose.pose.orientation.x = orientation[0]
-    target.target_pose.pose.orientation.y = orientation[1]
-    target.target_pose.pose.orientation.z = orientation[2]
-    target.target_pose.pose.orientation.w = orientation[3]
+    target.target_type = target_type
+    target.tcp_pose.header.frame_id = frame_id
+    target.tcp_pose.pose.position.x = position[0]
+    target.tcp_pose.pose.position.y = position[1]
+    target.tcp_pose.pose.position.z = position[2]
+    target.tcp_pose.pose.orientation.x = orientation[0]
+    target.tcp_pose.pose.orientation.y = orientation[1]
+    target.tcp_pose.pose.orientation.z = orientation[2]
+    target.tcp_pose.pose.orientation.w = orientation[3]
     target.confidence = confidence
     target.source = str(section.get("source", "manual_yaml"))
     return target
 
 
-def build_goal_from_config(config, base_frame=DEFAULT_BASE_FRAME):
-    """Validate the whole YAML config and return a ready ExecuteDualHarvest goal."""
+def build_goal_from_config(
+    config,
+    task_type="tomato_pick",
+    base_frame=DEFAULT_BASE_FRAME,
+    execute_left=True,
+    execute_right=True,
+):
+    """Validate the YAML config and return a ready unified task goal."""
     if not isinstance(config, dict):
         raise ValueError("config root must be a mapping with left/right sections")
-    goal = ExecuteDualHarvest.Goal()
-    goal.left_target = build_target(config.get("left"), "left", base_frame)
-    goal.right_target = build_target(config.get("right"), "right", base_frame)
+    if task_type not in ("tomato_pick", "leaf_remove"):
+        raise ValueError(f"unsupported task_type: {task_type!r}")
+    if not execute_left and not execute_right:
+        raise ValueError("at least one arm must be enabled")
+    goal = ExecuteTask.Goal()
+    goal.task_id = str(uuid.uuid4())
+    goal.task_type = task_type
+    goal.execute_left = execute_left
+    goal.execute_right = execute_right
+    if execute_left:
+        goal.left_target = build_target(config.get("left"), "left", base_frame)
+    if execute_right:
+        goal.right_target = build_target(config.get("right"), "right", base_frame)
     return goal
 
 
-class ManualHarvestSender(Node):
+class ManualTaskSender(Node):
     def __init__(self, goal, timeout_sec, loop=False, loop_delay_sec=3.0):
         super().__init__("send_manual_harvest_goal")
         self._goal = goal
         self._timeout_sec = timeout_sec
         self._loop = loop
         self._loop_delay_sec = loop_delay_sec
-        self._client = ActionClient(self, ExecuteDualHarvest, ACTION_NAME)
+        self._client = ActionClient(self, ExecuteTask, ACTION_NAME)
         self._last_feedback_line = ""
         self._paused = False
 
     def _print_feedback(self, feedback):
         self._paused = "PAUSED" in (feedback.left_stage, feedback.right_stage)
         line = (
-            f"[feedback] left={feedback.left_stage or '-'} "
+            f"[feedback] state={feedback.state} stage={feedback.current_stage or '-'} "
+            f"progress={feedback.progress:.0%} left={feedback.left_stage or '-'} "
             f"({feedback.left_progress:.0%})  "
             f"right={feedback.right_stage or '-'} "
             f"({feedback.right_progress:.0%})  {feedback.message}"
@@ -150,6 +173,10 @@ class ManualHarvestSender(Node):
         """
         self._last_feedback_line = ""
         self._paused = False
+        self._goal.task_id = str(uuid.uuid4())
+        stamp = self.get_clock().now().to_msg()
+        self._goal.left_target.tcp_pose.header.stamp = stamp
+        self._goal.right_target.tcp_pose.header.stamp = stamp
         send_future = self._client.send_goal_async(
             self._goal, feedback_callback=lambda msg: self._print_feedback(msg.feedback)
         )
@@ -159,7 +186,7 @@ class ManualHarvestSender(Node):
             return 2, None
         goal_handle = send_future.result()
         if not goal_handle.accepted:
-            self.get_logger().error("Goal rejected by the harvest executor")
+            self.get_logger().error("Goal rejected by the task executor")
             return 1, None
 
         result_future = goal_handle.get_result_async()
@@ -187,7 +214,7 @@ class ManualHarvestSender(Node):
     def run(self):
         if not self._client.wait_for_server(self._timeout_sec):
             self.get_logger().error(
-                f"ExecuteDualHarvest action server {ACTION_NAME} not available"
+                f"ExecuteTask action server {ACTION_NAME} not available"
             )
             return 2
         self.get_logger().info(
@@ -200,12 +227,12 @@ class ManualHarvestSender(Node):
         """Repeat the same goal forever until Ctrl-C (SIGINT)."""
         if not self._client.wait_for_server(self._timeout_sec):
             self.get_logger().error(
-                f"ExecuteDualHarvest action server {ACTION_NAME} not available"
+                f"ExecuteTask action server {ACTION_NAME} not available"
             )
             return 2
         self.get_logger().info(
-            f"Loop mode: repeating left={self._goal.left_target.target_id} "
-            f"right={self._goal.right_target.target_id} every "
+            f"Loop mode: repeating task={self._goal.task_type} "
+            f"left={self._goal.left_target.target_id} right={self._goal.right_target.target_id} every "
             f"{self._loop_delay_sec:.1f}s until Ctrl-C"
         )
         iteration = 0
@@ -235,6 +262,12 @@ def parse_args(argv):
         type=Path,
         default=None,
         help="Path to the manual targets YAML (default: installed manual_targets.yaml)",
+    )
+    parser.add_argument(
+        "--task-type",
+        choices=("tomato_pick", "leaf_remove"),
+        default="tomato_pick",
+        help="Task to execute (default: tomato_pick)",
     )
     parser.add_argument("--no-left", action="store_true", help="Disable the left arm")
     parser.add_argument("--no-right", action="store_true", help="Disable the right arm")
@@ -272,14 +305,14 @@ def load_config(path):
 def main(argv=None):
     args = parse_args(argv if argv is not None else sys.argv[1:])
     try:
-        goal = build_goal_from_config(load_config(args.config))
+        goal = build_goal_from_config(
+            load_config(args.config), args.task_type,
+            execute_left=not args.no_left, execute_right=not args.no_right)
     except (OSError, ValueError, yaml.YAMLError) as exc:
         print(f"Invalid manual target config: {exc}", file=sys.stderr)
         return 2
-    goal.execute_left = not args.no_left
-    goal.execute_right = not args.no_right
     rclpy.init()
-    node = ManualHarvestSender(goal, args.timeout, args.loop, args.loop_delay)
+    node = ManualTaskSender(goal, args.timeout, args.loop, args.loop_delay)
     try:
         return node.run_loop() if args.loop else node.run()
     except KeyboardInterrupt:

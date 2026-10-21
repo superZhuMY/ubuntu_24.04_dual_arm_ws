@@ -10,6 +10,7 @@
 #include <string>
 
 #include <double_arm_harvest_interfaces/msg/harvest_target.hpp>
+#include <double_arm_harvest_interfaces/msg/task_target.hpp>
 
 namespace double_arm_harvest_execution
 {
@@ -22,6 +23,10 @@ namespace double_arm_harvest_execution
 /// reason (without the arm prefix).
 std::string validate_harvest_target(
   const double_arm_harvest_interfaces::msg::HarvestTarget & target,
+  const std::string & base_frame, double min_confidence);
+
+std::string validate_task_target(
+  const double_arm_harvest_interfaces::msg::TaskTarget & target,
   const std::string & base_frame, double min_confidence);
 
 /// Remembers harvest target ids that were accepted so a repeated target_id is

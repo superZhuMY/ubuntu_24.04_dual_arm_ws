@@ -10,15 +10,19 @@
 
 ```text
 人工 YAML 点位（未来：ROS2 视觉目标桥）
-  → /execute_dual_harvest : ExecuteDualHarvest
-  → dual_arm_harvest_executor
-      ├─ MoveIt：当前状态 → IK / 关节目标 → 各阶段轨迹
-      ├─ 双臂轨迹分发：共享开始时间 + 阶段屏障
+  → 人工 YAML / future perception → TaskTarget
+  → /execute_task : ExecuteTask(task_type, targets, arm roles)
+  → TaskExecutor
+      ├─ TomatoPickTask / LeafRemoveTask（共享流程策略）
+      ├─ MotionSkill：MoveIt IK / 规划 → 轨迹阶段分发
+      │   → TrajectoryDispatcher + StageBarrier：共享开始时间与双臂屏障
       │   → 左右 FollowJointTrajectory Action
       │   → streaming / sparse 执行器
       │   → 左右 ForwardCommandController 的六轴位置目标
       │   → ros2_control 硬件插件 → STM32 → 电机
-      └─ /dual_gripper/command → Modbus RTU 双夹爪
+      └─ GripperSkill → /dual_gripper/command → Modbus RTU 双夹爪
+
+旧 `/execute_dual_harvest` 在过渡期保留，通过兼容转换接入同一个 `TaskExecutor`。
 
 电机位置 → STM32 → 硬件插件 → joint_state_broadcaster
   → /joint_states → 执行器到位确认 / MoveIt 当前状态 / TF
@@ -70,15 +74,15 @@ VALIDATE → PREPARE_GRIPPER（开爪）
 
 左右启用臂的阶段轨迹共用计划开始时间，阶段屏障等待全部成功才进入下一阶段；失败 / 取消处理见 `failure_policy.cpp`、`stage_barrier.cpp`、`trajectory_dispatcher.cpp`。整个采摘任务有 busy 门控和目标 ID 预留检查。当前目标 ID 在任务结束时释放，属于活动任务的预留机制，不是持久的“已采摘目标历史”；成功后重复提交同一对 ID 可以再次执行。视觉层如需避免反复采摘同一目标，应另做时间和空间去重。
 
-`task_mode=tomato_pick` 为通常时序。`task_mode=leaf` 仅错开 RETREAT：默认右臂先缩 J3，左臂延迟 3 秒，其余阶段相同。支持禁用任一臂以进行单臂验证。
+任务类型通过 `/execute_task` Action Goal 的 `task_type` 在运行时选择。`tomato_pick` 保持同步阶段；`leaf_remove` 仅在双臂 RETREAT 时右臂先缩 J3、左臂延迟 3 秒。左臂独立、右臂独立与双臂请求共用同一任务接口。统一环境入口为 `double_arm_bringup robot.launch.py mode:=fake|readonly|real`。
 
 ## 3. 异常处理与结果边界
 
 | 条件 | 软件处理 | 排查入口 |
 |---|---|---|
-| 有采摘任务运行、无启用臂、ID 空 / 重复、MoveGroup 未就绪 | 拒绝 goal | `DualHarvestExecutor::on_goal()` |
+| 有任务运行、无启用臂、启用臂 ID 空 / 重复、动作门控关闭、MoveGroup 未就绪 | 拒绝 goal | `TaskExecutor::accept_request()` |
 | 启用臂位姿非法、置信度不足、反馈缺失 / 过期 | 任务在 VALIDATE 或后续阶段失败 | `failure_policy.cpp`、当前状态检查 |
-| 规划失败或 J3 伸缩时其他关节偏离超限 | 终止任务，不进入下一阶段 | `dual_harvest_executor.cpp` 的规划和伸缩检查 |
+| 规划失败或 J3 伸缩时其他关节偏离超限 | 终止任务，不进入下一阶段 | `MotionSkill` |
 | 某臂轨迹失败、接受超时或阶段超时 | 阶段失败并处理对端取消；迟到接受的 goal 也会被取消 | `trajectory_dispatcher.cpp`、阶段等待逻辑 |
 | streaming 状态过期、无进展或单段超时 | 中止轨迹 Action，尝试保持最新反馈位置 | `StreamingTrajectoryExecutor::_execute()` |
 | 客户端取消 | 取消当前阶段，尝试结束为 CANCELED；状态转换竞态有 abort 回退 | 采摘取消回调及 `finish_canceled` |
@@ -97,6 +101,6 @@ VALIDATE → PREPARE_GRIPPER（开爪）
 
 [视觉链路参考](vision_pipeline/README.md)所在的 `docs/vision_pipeline/` 是 ROS1 Noetic 参考提取，不是当前 ROS2 包。它展示 RealSense RGB / 对齐深度 → YOLO 检测 → 像素深度反投影 → 静态相机到 base 变换 → 工作空间 / 时间 / 重复目标过滤 → 老 `/dual_arm_task` 的链路。
 
-未来接入当前工程，应将视觉结果转换为 `HarvestTarget`，提供 `base_link` 位姿、合法四元数、每臂置信度和唯一目标 ID，再调用 `/execute_dual_harvest`。老 `direction` 编号需要转成姿态，旧目标偏移不能在新执行层重复叠加。相机内参、手眼矩阵、工作空间与 TCP 偏移需针对新平台标定。
+未来接入当前工程时，感知层输出 `DetectedTarget`（识别 / 定位得到的检测位姿），目标处理层再生成 `TaskTarget.tcp_pose`（最终执行 TCP 位姿），交给策略模块提交 `/execute_task` Goal。视觉节点不进入任务执行器；目标类型、时间戳、坐标系、置信度和来源随消息传递。旧 `direction` 编号需要先转成姿态，旧目标偏移不能在新执行层重复叠加。相机内参、手眼矩阵、工作空间与 TCP 偏移需针对新平台标定。
 
-该目录 README 记录的推理环境、驱动安装和 USB 状态是 2026-09-22 的检查结果，本次未重新探测。权重及 vendored ultralytics 留在 `/home/zmy/tomato/vision_double_arm_ros1`，不属于当前 8 包。参考文档还含旧 `plan_only/dry_run`、工具偏移等描述，当前执行契约以[接口与配置](interfaces_and_config.md)、[开发与运行说明](development.md)及 ROS2 源码为准。
+该目录 README 记录的推理环境、驱动安装和 USB 状态是 2026-09-22 的检查结果，本次未重新探测。权重及 vendored ultralytics 留在 `/home/zmy/tomato/vision_double_arm_ros1`，不属于当前 9 包。参考文档还含旧 `plan_only/dry_run`、工具偏移等描述，当前执行契约以[接口与配置](interfaces_and_config.md)、[开发与运行说明](development.md)及 ROS2 源码为准。
