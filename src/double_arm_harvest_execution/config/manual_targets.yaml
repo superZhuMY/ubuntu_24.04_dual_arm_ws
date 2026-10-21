@@ -10,7 +10,7 @@
 left:
   target_id: left_test_001
   frame_id: base_link
-  position: [0.16553, 0.53469, 0.34786]
+  position: [0.21388, 0.52951, 0.16433]
   orientation: [-0.17307, 0.014284, 0.080764, 0.98149]
   confidence: 1.0
   source: manual_yaml
@@ -18,7 +18,7 @@ left:
 right:
   target_id: right_test_001
   frame_id: base_link
-  position: [0.49515, 0.52042, 0.20029]
+  position: [0.49515, 0.55042, 0.16229]
   orientation: [-0.26652, 0.35778, -0.085306, 0.89089]
   confidence: 1.0
   source: manual_yaml

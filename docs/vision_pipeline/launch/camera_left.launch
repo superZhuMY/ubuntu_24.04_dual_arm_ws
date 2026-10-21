@@ -1,0 +1,18 @@
+<launch>
+  <arg name="serial_no" default="f0211703"/>
+  <arg name="align_depth" default="true"/>
+  <arg name="camera_fps" default="15"/>
+
+  <include file="$(find realsense2_camera)/launch/rs_camera.launch">
+    <arg name="camera" value="left_camera"/>
+    <arg name="serial_no" value="$(arg serial_no)"/>
+    <arg name="align_depth" value="$(arg align_depth)"/>
+    <arg name="enable_sync" value="true"/>
+    <arg name="initial_reset" value="true"/>
+    <arg name="enable_color" value="true"/>
+    <arg name="enable_depth" value="true"/>
+    <arg name="enable_confidence" value="false"/>
+    <arg name="color_fps" value="$(arg camera_fps)"/>
+    <arg name="depth_fps" value="$(arg camera_fps)"/>
+  </include>
+</launch>

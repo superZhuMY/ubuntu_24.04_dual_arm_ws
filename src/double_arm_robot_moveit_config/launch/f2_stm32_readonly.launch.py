@@ -27,7 +27,8 @@ from launch_ros.substitutions import FindPackageShare
 
 def generate_launch_description():
     args = {
-        "stm32_device": ("/dev/ttyUSB0", None),
+        "stm32_device": (
+            "/dev/serial/by-path/pci-0000:06:00.3-usb-0:2.2.2:1.0-port0", None),
         "stm32_baud_rate": ("115200", None),
         "stm32_target_ack_timeout_ms": ("200", None),
         "stm32_state_timeout_ms": ("200", None),

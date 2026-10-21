@@ -1,4 +1,4 @@
-# Normalized gripper command. 0.0 is the calibrated open position and 1.0 is
+# Gripper command, normalized by default. 0.0 is the calibrated open position and 1.0 is
 # the calibrated closed position. Each enabled side is written to its configured
 # slave/register endpoint on the shared RS485 Modbus RTU bus.
 bool command_left
@@ -6,6 +6,12 @@ bool command_right
 float32 left_position
 float32 right_position
 uint32 duration_ms
+# Calibration mode: write the selected raw uint16 values without normalization
+# or clamping to the calibrated open/closed interval. Positions above are
+# ignored in this mode. Values are device register units, not measured degrees.
+bool use_raw_values
+uint16 left_raw_value
+uint16 right_raw_value
 ---
 bool success
 bool left_success
@@ -15,6 +21,7 @@ int32 left_pulse
 int32 right_pulse
 string message
 ---
+# Normalized-position feedback is only published when use_raw_values is false.
 float32 left_position
 float32 right_position
 bool left_reached

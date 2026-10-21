@@ -1,0 +1,96 @@
+# 番茄视觉识别和双臂任务桥接配置。
+# 相机内参默认来自单臂工程；通常只需要修改左右相机的 T_camera_to_base 外参。
+
+detector:
+  weights_path: ""  # 权重文件路径；留空表示使用本包 weights/putong.pt，已和 bishe_code 中 putong.pt 保持一致。
+  input_size: 640  # 模型输入尺寸；和 bishe_code 推理流程一致，默认 640。
+  confidence_threshold: 0.80  # 检测置信度阈值；调低会增加检出率但误检更多。
+  iou_threshold: 0.10  # NMS 的 IOU 阈值；和 bishe_code 正式脚本一致。
+  num_classes: 2  # 模型类别数；putong.pt 输出按 2 类做 NMS。
+  target_class_ids: [0]  # 番茄类别编号；bishe_code 中 class 1 会被当作非番茄过滤。
+  max_detections: 10  # 单帧最多保留检测框数量。
+  display: true  # 是否显示 OpenCV 检测画面；每个检测节点显示一个窗口。
+  publish_empty: false  # 没有检测到番茄时是否仍发布空检测消息，便于调试 topic。
+  depth_patch_radius: 2  # 中心点深度为 0 时，向周围半径 2 像素的小窗口取有效深度中值。
+  min_depth_m: 0.50  # 相机坐标系 Z 最小距离；按 bishe_code 过滤逻辑设置。
+  max_depth_m: 1.20  # 相机坐标系 Z 最大距离；按 bishe_code 过滤逻辑设置。
+  camera_x_min_m: -0.20  # 相机坐标系 X 最小值；超出会过滤。
+  camera_x_max_m: 0.20  # 相机坐标系 X 最大值；超出会过滤。
+
+cameras:
+  left:
+    enabled: true  # 是否启用左相机检测配置。
+    calibrated: true  # 手眼外参是否已标定；未标定时 bridge 默认不发布任务。
+    color_topic: /left_camera/color/image_raw  # 左相机 RGB 图像 topic。
+    depth_topic: /left_camera/aligned_depth_to_color/image_raw  # 左相机对齐到彩色图的深度 topic。
+    camera_frame: left_camera_color_optical_frame  # 左相机光学坐标系 frame_id。
+    depth_scale: 0.001  # 深度单位比例；RealSense 16UC1 通常为毫米转米 0.001。
+    intrinsics:  # 左相机内参；
+      fx: 913.7384643554688  # 焦距 fx。
+      fy: 913.9617919921875  # 焦距 fy。
+      cx: 641.9942626953125  # 主点 cx。
+      cy: 373.4631042480469  # 主点 cy。
+    T_camera_to_base:  # 左相机到 base_link 的 4x4 外参矩阵；后续根据手眼标定结果修改。
+      - [0.969379015, 0.035791656, 0.242947076, 0.096620071]
+      - [-0.215966917, -0.346646482, 0.912794888, 0.066315060]
+      - [0.116887190, -0.937312741, -0.328302011, 0.282530811]
+      - [0.0, 0.0, 0.0, 1.0]
+
+  right:
+    enabled: true  # 是否启用右相机检测配置。
+    calibrated: true  # 手眼外参是否已标定；未标定时 bridge 默认不发布任务。
+    color_topic: /right_camera/color/image_raw  # 右相机 RGB 图像 topic。
+    depth_topic: /right_camera/aligned_depth_to_color/image_raw  # 右相机对齐到彩色图的深度 topic。
+    camera_frame: right_camera_color_optical_frame  # 右相机光学坐标系 frame_id。
+    depth_scale: 0.001  # 深度单位比例；RealSense 16UC1 通常为毫米转米 0.001。
+    intrinsics:  # 右相机内参；默认沿用单臂工程内参。
+      fx: 900.6747436523438  # 焦距 fx。
+      fy: 901.5196533203125  # 焦距 fy。
+      cx: 657.5897827148438  # 主点 cx。
+      cy: 373.44219970703125  # 主点 cy。
+    T_camera_to_base:  # 右相机到 base_link 的 4x4 外参矩阵；后续根据手眼标定结果修改。
+      - [0.972860867, -0.013790486, -0.230979557, 0.696996777]
+      - [0.213496089, -0.331421986, 0.919009732, 0.074506152]
+      - [-0.089225295, -0.943381837, -0.319483266, 0.279088977]
+      - [0.0, 0.0, 0.0, 1.0]
+
+bridge:
+  task_mode: leaf  # 默认视觉任务模式；launch 会覆盖，leaf=打叶，tomato_pick=番茄采摘。
+  active_arm: both  # 默认启用手臂；launch 会覆盖，left=只左臂，right=只右臂，both=左右都处理。
+
+  topics:
+    left: /left_tomato_detections  # 左相机番茄检测结果；采摘左臂默认读取它。
+    right: /right_tomato_detections  # 右相机番茄检测结果；采摘右臂默认读取它。
+    leaf_left: /left_tomato_detections  # 左臂打叶调试使用的检测结果 topic。
+    leaf_right: /right_tomato_detections  # 右臂打叶调试使用的检测结果 topic。
+
+  common:
+    selected_topic: /selected_tomato  # 选中目标调试输出；launch 可按左右臂覆盖为独立 topic。
+    task_topic: /dual_arm_task  # 发布给 moveit_exe/dual_arm_task_executor.py 的任务 topic。
+    source: vision_tomato  # DualArmTask.source 前缀。
+    require_calibrated_transform: true  # true 时必须 calibrated=true 才允许发布任务。
+    min_publish_period_sec: 5.0  # 最短任务发布间隔，避免检测频率过高时连续触发机械臂。
+    repeat_suppression_radius_m: 0.05  # 重复目标抑制半径；目标距离上次发布点小于该值会被跳过。
+    repeat_suppression_sec: 7.0  # 重复目标抑制时间窗口。
+    workspace:  # base_link 下允许发布任务的工作空间范围。
+      x_min: 0.0
+      x_max: 0.80
+      y_min: -0.20
+      y_max: 0.65
+      z_min: 0.010
+      z_max: 0.50
+
+  leaf:
+    detections_topic: /left_tomato_detections  # 打叶双臂模式默认检测 topic；单臂 launch 会改用 leaf_left/leaf_right。
+    left_direction: 3  # 打叶模式左臂姿态库方向编号。
+    right_direction: 3  # 打叶模式右臂姿态库方向编号。
+    left_support_offset_base: [-0.02, 0.0, 0.045]  # 打叶左臂目标相对番茄点的 base_link 偏移。
+    right_leaf_offset_base: [0.0, 0.0, 0.20]  # 打叶右臂目标相对番茄点的 base_link 偏移。
+
+  tomato_pick:
+    pick_pair_timeout_sec: 1.0  # 采摘双臂模式下左右检测结果可合并的最大时间差。
+    require_both_arms_for_pick: false  # true 时必须左右相机都检测到目标才发布采摘任务。
+    left_direction: 3  # 采摘模式左臂姿态库方向编号。
+    right_direction: 3  # 采摘模式右臂姿态库方向编号。
+    left_pick_offset_base: [-0.02, 0.0, 0.045]  # 采摘左臂目标相对左相机番茄点的 base_link 偏移。
+    right_pick_offset_base: [0.02, 0.0, 0.035]  # 采摘右臂目标相对右相机番茄点的 base_link 偏移。

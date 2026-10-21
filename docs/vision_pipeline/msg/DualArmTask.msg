@@ -1,0 +1,9 @@
+std_msgs/Header header
+geometry_msgs/Point left_support_point
+int32 left_direction
+bool execute_left
+geometry_msgs/Point right_leaf_point
+int32 right_direction
+bool execute_right
+float32 confidence
+string source

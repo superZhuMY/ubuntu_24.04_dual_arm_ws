@@ -58,7 +58,8 @@ def _node_override(**params):
 
 def generate_launch_description():
     args = {
-        "stm32_device": ("/dev/ttyUSB0", None),
+        "stm32_device": (
+            "/dev/serial/by-path/pci-0000:06:00.3-usb-0:2.2.2:1.0-port0", None),
         "stm32_baud_rate": ("115200", None),
         "stm32_target_ack_timeout_ms": ("200", None),
         "stm32_state_timeout_ms": ("200", None),
@@ -73,7 +74,8 @@ def generate_launch_description():
         "stm32_joint_directions": ("1,1,1,1,-1,1,1,1,1,1,-1,1", None),
         "allow_motor_enable": ("true", ["true", "false"]),
         "start_rviz": ("true", ["true", "false"]),
-        "gripper_device": ("/dev/tcp_gripper", None),
+        "gripper_device": (
+            "/dev/serial/by-path/pci-0000:06:00.3-usb-0:2.2.3:1.0-port0", None),
         "task_mode": (_harvest_motion_default("task_mode", "tomato_pick"),
                       ["tomato_pick", "leaf"]),
     }

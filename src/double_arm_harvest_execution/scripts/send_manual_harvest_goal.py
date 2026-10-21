@@ -9,6 +9,8 @@ anything on invalid input.
 With --loop the same target pair is re-sent forever (until Ctrl-C), pausing
 --loop-delay seconds between iterations. The executor releases the target id
 when a task ends, so the same target_id can be reused.
+Stage failures stay PAUSED until canceled; paused time does not expire the
+result wait. A canceled, rejected, or timed-out task stops loop mode.
 
 Usage:
   ros2 run double_arm_harvest_execution send_manual_harvest_goal.py \
@@ -126,8 +128,10 @@ class ManualHarvestSender(Node):
         self._loop_delay_sec = loop_delay_sec
         self._client = ActionClient(self, ExecuteDualHarvest, ACTION_NAME)
         self._last_feedback_line = ""
+        self._paused = False
 
     def _print_feedback(self, feedback):
+        self._paused = "PAUSED" in (feedback.left_stage, feedback.right_stage)
         line = (
             f"[feedback] left={feedback.left_stage or '-'} "
             f"({feedback.left_progress:.0%})  "
@@ -145,6 +149,7 @@ class ManualHarvestSender(Node):
         finished task, or None when acceptance/result never arrived.
         """
         self._last_feedback_line = ""
+        self._paused = False
         send_future = self._client.send_goal_async(
             self._goal, feedback_callback=lambda msg: self._print_feedback(msg.feedback)
         )
@@ -158,7 +163,12 @@ class ManualHarvestSender(Node):
             return 1, None
 
         result_future = goal_handle.get_result_async()
-        rclpy.spin_until_future_complete(self, result_future, timeout_sec=self._timeout_sec)
+        deadline = time.monotonic() + self._timeout_sec
+        while rclpy.ok() and not result_future.done():
+            rclpy.spin_once(self, timeout_sec=0.1)
+            # A paused task waits for the operator, not for a client timeout.
+            if not self._paused and time.monotonic() >= deadline:
+                break
         if not result_future.done():
             self.get_logger().error("Timed out waiting for the task result")
             return 2, None
@@ -207,8 +217,9 @@ class ManualHarvestSender(Node):
                 if code != 0:
                     self.get_logger().warn(
                         f"iteration {iteration} did not succeed (status={status}); "
-                        "continuing after the delay"
+                        "loop stopped; inspect or cancel the task before restarting"
                     )
+                    return code
                 time.sleep(self._loop_delay_sec)
         except KeyboardInterrupt:
             self.get_logger().info(f"Loop stopped by user after {iteration} iterations")

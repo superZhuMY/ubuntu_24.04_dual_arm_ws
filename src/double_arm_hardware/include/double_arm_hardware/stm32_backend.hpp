@@ -849,6 +849,7 @@ inline Stm32Backend::Stats Stm32Backend::stats() const
 {
   std::lock_guard<std::mutex> lock(cache_mtx_);
   Stats s = stats_;
+  s.gate_close_reason = gate_close_reason_;
   // Fold in transport mismatch / error counters.
   s.ack_seq_mismatch = static_cast<uint64_t>(transport_->ack_seq_mismatch_count());
   s.ack_cmd_mismatch = static_cast<uint64_t>(transport_->ack_cmd_mismatch_count());

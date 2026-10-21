@@ -88,6 +88,7 @@ if(BUILD_TESTING)
   find_package(launch_testing_ament_cmake REQUIRED)
   add_launch_test(test/test_fake_harvest_integration.py TIMEOUT "600")
   add_launch_test(test/test_fake_harvest_leaf_integration.py TIMEOUT "600")
+  add_launch_test(test/test_fake_harvest_pause.py TIMEOUT "180")
 endif()
 
 ament_package()

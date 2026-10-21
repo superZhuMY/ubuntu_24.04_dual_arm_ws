@@ -1,0 +1,6 @@
+# Read both configured holding registers without commanding motion.
+---
+bool success
+uint16 left_value
+uint16 right_value
+string message

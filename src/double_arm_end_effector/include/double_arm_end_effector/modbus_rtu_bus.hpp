@@ -27,6 +27,7 @@ public:
     int stop_bits, int response_timeout_ms);
   void close() noexcept;
   void write_register(int slave_id, int address, uint16_t value);
+  uint16_t read_register(int slave_id, int address);
   bool is_open() const noexcept;
 
 private:

@@ -1,0 +1,37 @@
+<launch>
+  <arg name="config_path" default="$(find vision_double_arm_ros1)/config/vision_task.yaml"/>
+  <arg name="motion_config_path" default="$(find moveit_exe)/config/manual_dual_arm_task.yaml"/>
+  <arg name="dry_run" default="false"/>
+  <arg name="plan_only" default="true"/>
+  <arg name="post_task_cooldown_sec" default="3.0"/>
+  <arg name="robot_description_timeout_sec" default="30.0"/>
+  <arg name="parallel_pick" default="false"/>
+
+  <node name="pick_left_task_executor"
+        pkg="moveit_exe"
+        type="dual_arm_task_executor.py"
+        output="screen">
+    <param name="config_path" value="$(arg motion_config_path)"/>
+    <param name="task_topic" value="/dual_arm_task"/>
+    <param name="task_name" value=""/>
+    <param name="dry_run" value="$(arg dry_run)"/>
+    <param name="plan_only" value="$(arg plan_only)"/>
+    <param name="execute_left" value="true"/>
+    <param name="execute_right" value="false"/>
+    <param name="task_mode" value="tomato_pick"/>
+    <param name="post_task_cooldown_sec" value="$(arg post_task_cooldown_sec)"/>
+    <param name="robot_description_timeout_sec" value="$(arg robot_description_timeout_sec)"/>
+    <param name="parallel_pick" value="$(arg parallel_pick)"/>
+  </node>
+
+  <node name="pick_left_task_bridge"
+        pkg="vision_double_arm_ros1"
+        type="dual_arm_task_bridge_node.py"
+        output="screen">
+    <rosparam command="load" file="$(arg config_path)"/>
+    <param name="task_mode" value="tomato_pick"/>
+    <param name="active_arm" value="left"/>
+    <param name="selected_topic" value="/left_selected_tomato"/>
+    <param name="task_topic" value="/dual_arm_task"/>
+  </node>
+</launch>

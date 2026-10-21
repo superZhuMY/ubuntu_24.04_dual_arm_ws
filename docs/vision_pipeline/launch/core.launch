@@ -1,0 +1,12 @@
+<launch>
+  <arg name="start_hardware_bridge" default="false"/>
+  <arg name="use_rviz" default="true"/>
+  <arg name="moveit_controller_manager" default="fake"/>
+
+  <include file="$(find jaka_controller_tcp)/launch/double_arm_core.launch">
+    <arg name="start_moveit" value="true"/>
+    <arg name="start_hardware_bridge" value="$(arg start_hardware_bridge)"/>
+    <arg name="use_rviz" value="$(arg use_rviz)"/>
+    <arg name="moveit_controller_manager" value="$(arg moveit_controller_manager)"/>
+  </include>
+</launch>

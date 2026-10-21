@@ -8,6 +8,14 @@
 
 工程文档入口：[项目总览](docs/project_overview.md)，由总览按需进入架构、接口配置和开发排障专题。
 
+当前 STM32 双臂、独立 RS485 夹爪、标定界面及 manual 采摘的启动步骤见
+[采摘启动与排障](docs/harvest_bringup.md)和[夹爪接入说明](docs/dual_gripper_integration.md)。
+`harvest_stm32.launch.py` 已包含 MoveIt，启动前先退出旧的 `stm32_moveit` 或采摘
+launch，避免同名 controller_manager 导致控制器加载到错误实例。
+
+2026-10-20 现场日志已确认 STM32 12 轴激活、MoveIt 轨迹执行和夹爪开闭写入；
+采摘运行中仍出现夹爪 Modbus 超时及 STM32 硬件故障，不能据此认定整套采摘已稳定验收。
+
 ## 目录结构
 
 ```
@@ -27,6 +35,16 @@ docs/                             阶段性报告链与测试日志
 夹爪接线、ID 设置、脉宽标定、独立测试和整套采摘启动见
 [`docs/dual_gripper_integration.md`](docs/dual_gripper_integration.md)。
 
+夹爪开合标定界面（先按上述文档重新构建接口并 source 工作区）：
+
+```bash
+ros2 launch double_arm_end_effector gripper_calibration.launch.py allow_motion:=true
+```
+
+界面可分别输入左右夹爪的原始寄存器值，微调后发送并记录开值/闭值，再复制到
+`dual_gripper.yaml`。已有夹爪节点时只运行
+`ros2 run double_arm_end_effector gripper_calibration_gui.py`。
+
 ## 两条控制路径
 
 `ros2_control.xacro` 用 `transport_type` 一个参数切换，两个插件均已在
@@ -39,7 +57,7 @@ docs/                             阶段性报告链与测试日志
 | 真机状态 | ✅ **已验证**：E.2 只读 / E.3 使能保持 / E.4 回零 / E.5 分臂 MoveIt 轨迹全部跑通 | ✅ STM32 12 轴链路和稀疏执行已接真机；混合执行待继续调参 |
 | 后续阶段 | E 系列，结论待现场定稿 | F 系列，F.2 真机入口已就绪未启动 |
 
-> 要继续做真机 → 走 `direct_motor`；要迁移 STM32 → 走 `stm32`。
+当前按 USB 插口配置的双臂入口使用 `stm32`；`direct_motor` 保留历史直连路径。
 
 ## 构建
 
@@ -67,7 +85,8 @@ colcon test-result --all
 ## 真机启动入口
 
 **前提**：真实模式打开串口需同时满足 `enable_hardware && allow_hardware_io`；
-STM32 路径的运动额外需 `!stm32_read_only && allow_motor_enable`（默认只读）。
+STM32 路径的运动额外需 `!stm32_read_only && allow_motor_enable`。
+`stm32_moveit.launch.py` 默认普通控制并使能电机；只读入口为 `f2_stm32_readonly.launch.py`。
 执行前确认急停可触达、周边无人/无障碍。
 
 ```bash
@@ -87,14 +106,14 @@ ros2 launch double_arm_robot_moveit_config e5_moveit.launch.py \
   hardware_mode:=real e3_safe_hold:=true e3_preview_only:=false \
   e4_home:=false start_rviz:=true
 
-# F.2 STM32 只读（固定 real+stm32+read_only，仅状态链路）—— 尚未真机启动过
+# F.2 STM32 只读（仅状态链路；以当次有效位、故障位和使能位为准）
 ros2 launch double_arm_robot_moveit_config f2_stm32_readonly.launch.py \
-  stm32_device:=/dev/ttyUSB0
+  stm32_device:=/dev/serial/by-path/pci-0000:06:00.3-usb-0:2.2.2:1.0-port0
 
 # STM32 + MoveIt（默认 streaming 执行；方向默认值已含 F.3 标定结果，
 # 首次使用仍建议先用下面的逐轴工具复核）
 ros2 launch double_arm_robot_moveit_config stm32_moveit.launch.py \
-  stm32_device:=/dev/ttyUSB0 \
+  stm32_device:=/dev/serial/by-path/pci-0000:06:00.3-usb-0:2.2.2:1.0-port0 \
   stm32_joint_directions:=1,1,1,1,-1,1,1,1,1,1,-1,1 \
   stm32_zero_offsets:=0,0,0,0,0,0,0,0,0,0,0,0
 ```
@@ -122,7 +141,7 @@ MoveIt完整轨迹
 
 ```bash
 ros2 launch double_arm_robot_moveit_config stm32_moveit.launch.py \
-  stm32_device:=/dev/ttyUSB0 execution_mode:=streaming controller_update_rate:=10
+  stm32_device:=/dev/serial/by-path/pci-0000:06:00.3-usb-0:2.2.2:1.0-port0 execution_mode:=streaming controller_update_rate:=10
 ```
 
 启动时继续传入你已标定的 `stm32_joint_directions` 和 `stm32_zero_offsets`。

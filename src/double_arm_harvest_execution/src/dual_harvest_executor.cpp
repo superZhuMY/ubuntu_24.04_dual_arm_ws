@@ -924,23 +924,6 @@ void DualHarvestExecutor::execute(const std::shared_ptr<GoalHandleHarvest> goal_
     active_goal_ = goal_handle;
   }
 
-  auto fail = [&](const std::string & stage, const std::string & message) {
-      result->success = false;
-      result->left_success = false;
-      result->right_success = false;
-      result->failed_stage = stage;
-      result->message = message;
-      try {
-        goal_handle->abort(result);
-      } catch (const std::exception & ex) {
-        RCLCPP_ERROR(
-          get_logger(), "[task=%s] abort() transition failed: %s", task_id.c_str(),
-          ex.what());
-      }
-      RCLCPP_ERROR(
-        get_logger(), "[task=%s][%s] FAILED: %s", task_id.c_str(), stage.c_str(),
-        message.c_str());
-    };
   auto finish_canceled = [&](const std::string & stage) {
       result->success = false;
       result->left_success = false;
@@ -979,6 +962,38 @@ void DualHarvestExecutor::execute(const std::shared_ptr<GoalHandleHarvest> goal_
       RCLCPP_WARN(
         get_logger(), "[task=%s][%s] CANCELED", task_id.c_str(), stage.c_str());
     };
+  const float disabled_progress = 0.0f;
+  float left_progress = 0.0f;
+  float right_progress = 0.0f;
+
+  auto fail = [&](const std::string & stage, const std::string & message) {
+      // Keep this task and its busy gate alive. Never replay a failed stage or
+      // apply another relative J3 stroke; the operator must cancel first.
+      RCLCPP_WARN(get_logger(), "[task=%s][%s] PAUSED: %s; cancel the task before resubmitting",
+        task_id.c_str(), stage.c_str(), message.c_str());
+      publish_stage_feedback(
+        goal_handle, left_enabled ? "PAUSED" : "", right_enabled ? "PAUSED" : "",
+        left_progress, right_progress, "paused at " + stage + ": " + message);
+      std::unique_lock<std::mutex> lock(stage_mutex_);
+      while (rclcpp::ok() && goal_handle->is_active() && !cancel_requested_.load()) {
+        stage_cv_.wait_for(lock, std::chrono::milliseconds(200));
+      }
+      lock.unlock();
+      if (cancel_requested_.load()) {
+        finish_canceled(stage);
+      } else if (goal_handle->is_active()) {
+        // Shutdown must retire the goal instead of leaving a live goal handle.
+        result->success = false;
+        result->failed_stage = stage;
+        result->message = "node shut down while paused: " + message;
+        try {
+          goal_handle->abort(result);
+        } catch (const std::exception & ex) {
+          RCLCPP_WARN(get_logger(), "ending paused task during shutdown: %s", ex.what());
+        }
+      }
+    };
+
   auto succeed = [&](const std::string & message) {
       result->success = true;
       result->left_success = left_enabled;
@@ -994,10 +1009,6 @@ void DualHarvestExecutor::execute(const std::shared_ptr<GoalHandleHarvest> goal_
       }
       RCLCPP_INFO(get_logger(), "[task=%s] SUCCEEDED: %s", task_id.c_str(), message.c_str());
     };
-
-  const float disabled_progress = 0.0f;
-  float left_progress = 0.0f;
-  float right_progress = 0.0f;
 
   // -----------------------------------------------------------------------
   // VALIDATE
