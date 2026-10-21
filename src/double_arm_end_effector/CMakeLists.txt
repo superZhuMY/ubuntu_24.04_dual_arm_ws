@@ -43,11 +43,20 @@ install(TARGETS
 )
 install(DIRECTORY include/ DESTINATION include)
 install(DIRECTORY config launch DESTINATION share/${PROJECT_NAME})
+install(PROGRAMS scripts/gripper_calibration_gui.py DESTINATION lib/${PROJECT_NAME})
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(test_gripper_mapping test/test_gripper_mapping.cpp)
   target_link_libraries(test_gripper_mapping gripper_modbus)
+  find_package(ament_cmake_pytest REQUIRED)
+  ament_add_pytest_test(test_gripper_raw_action test/test_gripper_raw_action.py
+    TIMEOUT 60
+    ENV
+      "GRIPPER_CONTROLLER_EXECUTABLE=$<TARGET_FILE:dual_gripper_controller>"
+      "ROS_DOMAIN_ID=174"
+      "ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST"
+  )
 endif()
 
 ament_export_include_directories(include)

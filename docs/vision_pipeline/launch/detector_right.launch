@@ -1,0 +1,16 @@
+<launch>
+  <arg name="config_path" default="$(find vision_double_arm_ros1)/config/vision_task.yaml"/>
+  <arg name="conda_env" default="yolov9"/>
+  <arg name="conda_sh" default="/home/zmy/miniconda3/etc/profile.d/conda.sh"/>
+
+  <node name="tomato_detector_right"
+        pkg="vision_double_arm_ros1"
+        type="tomato_detector_node.py"
+        output="screen">
+    <env name="CONDA_ENV" value="$(arg conda_env)"/>
+    <env name="CONDA_SH" value="$(arg conda_sh)"/>
+    <rosparam command="load" file="$(arg config_path)"/>
+    <param name="camera_name" value="right"/>
+    <param name="detector/detections_topic" value="/right_tomato_detections"/>
+  </node>
+</launch>

@@ -8,8 +8,7 @@ and exercises three task outcomes:
 
 1. cancellation during APPROACH planning sends no arm motion targets;
 2. one coordinated dual-arm task runs end to end and returns SUCCEEDED;
-3. an unreachable target aborts at APPROACH and the message states that
-   nothing was dispatched.
+3. an unreachable target pauses at APPROACH until explicitly canceled.
 
 NOTE: the tests share one bring-up. The canceled task leaves the initial
 state unchanged, and the full task leaves both arms at HOME.
@@ -161,11 +160,19 @@ class FakeHarvestIntegration(unittest.TestCase):
             for sub in subscriptions:
                 self.node.destroy_subscription(sub)
 
-    def test_unreachable_target_aborts_without_dispatch(self):
+    def test_unreachable_target_pauses_until_cancel(self):
         goal = self._goal("it_left_002", "it_right_002")
         goal.left_target.target_pose.pose.position = Point(x=5.0, y=0.0, z=0.0)
-        wrapped = self._send_and_wait(goal)
-        self.assertEqual(wrapped.status, GoalStatus.STATUS_ABORTED)
+        pauses = []
+
+        def feedback(msg):
+            if msg.feedback.left_stage == "PAUSED" and not pauses:
+                pauses.append(msg.feedback.message)
+                self._active_goal_handle.cancel_goal_async()
+
+        wrapped = self._send_and_wait(goal, feedback_callback=feedback)
+        self.assertTrue(pauses)
+        self.assertIn("not dispatched", pauses[0])
+        self.assertEqual(wrapped.status, GoalStatus.STATUS_CANCELED)
         self.assertFalse(wrapped.result.success)
         self.assertEqual(wrapped.result.failed_stage, "APPROACH")
-        self.assertIn("not dispatched", wrapped.result.message)

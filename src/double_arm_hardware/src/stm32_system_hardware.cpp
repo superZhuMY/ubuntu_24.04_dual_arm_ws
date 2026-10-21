@@ -229,7 +229,7 @@ bool Stm32SystemHardware::parse_params()
 
   if (p_.stm32_device.empty()) {
     RCLCPP_ERROR(rclcpp::get_logger("Stm32SystemHardware"),
-      "[%s] stm32_device must be configured (prefer /dev/serial/by-id/...)",
+      "[%s] stm32_device must be configured (prefer a stable /dev/serial/by-path/...)",
       info_.name.c_str());
     return false;
   }
@@ -709,7 +709,8 @@ return_type Stm32SystemHardware::read(
   // Read-only mode: STATE_STALE is the only non-nominal condition and is
   // surfaced after the threshold; READ_ONLY itself is nominal.
   bool bad = false;
-  switch (backend_->health()) {
+  const auto health = backend_->health();
+  switch (health) {
     case Stm32Backend::Health::OK:
     case Stm32Backend::Health::READ_ONLY:
       consecutive_health_errors_ = 0;
@@ -728,9 +729,28 @@ return_type Stm32SystemHardware::read(
       break;
   }
   if (bad) {
+    const auto stats = backend_->stats();
+    unsigned int valid_bitmap = 0;
+    for (unsigned int axis = 0; axis < rs.valid.size(); ++axis) {
+      if (rs.valid[axis]) valid_bitmap |= (1U << axis);
+    }
+    const auto state_age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - rs.last_update).count();
     RCLCPP_ERROR(rclcpp::get_logger("Stm32SystemHardware"),
-      "[%s] read: health failure (%d consecutive)",
-      info_.name.c_str(), consecutive_health_errors_);
+      "[%s] read: health failure (%d consecutive), health=%d, "
+      "gate_reason='%s', target_timeouts=[%llu,%llu], "
+      "state_timeouts=%llu, transport_errors=%llu, "
+      "fault=0x%02X, enabled=0x%04X, valid=0x%04X, "
+      "state_age_ms=%lld, state_received=%llu",
+      info_.name.c_str(), consecutive_health_errors_, static_cast<int>(health),
+      stats.gate_close_reason.c_str(),
+      static_cast<unsigned long long>(stats.target_timeout[0]),
+      static_cast<unsigned long long>(stats.target_timeout[1]),
+      static_cast<unsigned long long>(stats.state_timeout),
+      static_cast<unsigned long long>(stats.transport_errors),
+      static_cast<unsigned int>(rs.fault), static_cast<unsigned int>(rs.enabled),
+      valid_bitmap, static_cast<long long>(state_age_ms),
+      static_cast<unsigned long long>(stats.state_received));
     return return_type::ERROR;
   }
   return return_type::OK;

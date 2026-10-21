@@ -76,6 +76,27 @@ void ModbusRtuBus::write_register(int slave_id, int address, uint16_t value)
   }
 }
 
+uint16_t ModbusRtuBus::read_register(int slave_id, int address)
+{
+  if (!valid_modbus_slave_id(slave_id) || !valid_modbus_register(address)) {
+    throw std::invalid_argument("invalid Modbus slave id or register address");
+  }
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (context_ == nullptr) {
+    throw std::runtime_error("Modbus RTU bus is not open");
+  }
+  if (modbus_set_slave(context_, slave_id) == -1) {
+    throw std::runtime_error("failed to select Modbus slave: " + std::string(modbus_strerror(errno)));
+  }
+  uint16_t value = 0;
+  if (modbus_read_registers(context_, address, 1, &value) != 1) {
+    throw std::runtime_error(
+            "Modbus read failed for slave " + std::to_string(slave_id) +
+            ", register " + std::to_string(address) + ": " + modbus_strerror(errno));
+  }
+  return value;
+}
+
 bool ModbusRtuBus::is_open() const noexcept
 {
   std::lock_guard<std::mutex> lock(mutex_);

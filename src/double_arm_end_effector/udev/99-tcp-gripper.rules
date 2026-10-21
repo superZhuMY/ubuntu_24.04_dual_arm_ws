@@ -2,15 +2,17 @@
 # Pinned by physical USB socket so the symlink does not depend on the ttyUSBx
 # number, which drifts on every replug/power cycle.
 #
-# Verified mapping on this machine (2026-09-23, read-only protocol probe):
-#   1-2.2.2 -> RS485 gripper bus  (/dev/tcp_gripper, Modbus RTU slave 4 at 9600)
-#   1-2.2.3 -> STM32 controller   (no alias; launch uses /dev/ttyUSB0 with a
-#                                  runtime override when the number differs)
+# Current mapping (2026-10-18):
+#   1-2.2.2 -> STM32 controller (115200 8N1)
+#   1-2.2.3 -> RS485 gripper (slave 3, 9600 8N1)
+# Both USB devices report the same CH340 ID without serial numbers, so the
+# physical socket is the only reliable discriminator.
 #
 # Both adapters are plain CH340 (1a86:7523) with no USB serial number, so the
 # USB socket path is the only stable discriminator.
 #
 # Install with:
-#   sudo cp src/double_arm_end_effector/udev/99-tcp-gripper.rules /etc/udev/rules.d/
+#   sudo install -m 0644 src/double_arm_end_effector/udev/99-tcp-gripper.rules /etc/udev/rules.d/
 #   sudo udevadm control --reload-rules && sudo udevadm trigger --subsystem-match=tty
-SUBSYSTEM=="tty", KERNELS=="1-2.2.2", SYMLINK+="tcp_gripper", MODE="0660", GROUP="dialout"
+SUBSYSTEM=="tty", KERNELS=="1-2.2.2", SYMLINK+="tcp_stm32", MODE="0660", GROUP="dialout"
+SUBSYSTEM=="tty", KERNELS=="1-2.2.3", SYMLINK+="tcp_gripper", MODE="0660", GROUP="dialout"

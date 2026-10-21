@@ -8,6 +8,7 @@ find_package(geometry_msgs REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/HarvestTarget.msg"
+  "srv/ReadGripperRegisters.srv"
   "action/DualGripperCommand.action"
   "action/ExecuteDualHarvest.action"
   DEPENDENCIES

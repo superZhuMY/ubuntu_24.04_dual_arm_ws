@@ -17,7 +17,7 @@
     <xacro:arg name="e4_hold_cycles" default="20" />
     <xacro:arg name="e4_static_hold_cycles" default="50" />
     <xacro:arg name="e4_max_error_rad" default="0.05" />
-    <xacro:arg name="stm32_device" default="/dev/ttyUSB0" />
+    <xacro:arg name="stm32_device" default="/dev/serial/by-path/pci-0000:06:00.3-usb-0:2.2.2:1.0-port0" />
     <xacro:arg name="stm32_baud_rate" default="115200" />
     <xacro:arg name="stm32_target_ack_timeout_ms" default="200" />
     <xacro:arg name="stm32_state_timeout_ms" default="200" />

@@ -1,0 +1,11 @@
+std_msgs/Header header
+string camera_name
+int32 class_id
+string class_name
+float32 confidence
+int32 u
+int32 v
+float32 depth_m
+geometry_msgs/Point camera_point
+geometry_msgs/Point base_point
+float32 distance_m
