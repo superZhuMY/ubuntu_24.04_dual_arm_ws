@@ -37,8 +37,8 @@ def generate_launch_description():
             "mode", default_value="fake", choices=["fake", "readonly", "real"],
             description="Hardware topology: fake, readonly, or real"),
         DeclareLaunchArgument("start_rviz", default_value="false", choices=["true", "false"]),
-        DeclareLaunchArgument("stm32_device", default_value="/dev/ttyUSB0"),
-        DeclareLaunchArgument("gripper_device", default_value="/dev/tcp_gripper"),
+        DeclareLaunchArgument("stm32_device", default_value="/dev/serial/by-path/pci-0000:06:00.3-usb-0:2.2.2:1.0-port0"),
+        DeclareLaunchArgument("gripper_device", default_value="/dev/serial/by-path/pci-0000:06:00.3-usb-0:2.2.3:1.0-port0"),
         DeclareLaunchArgument(
             "allow_motor_enable", default_value="false", choices=["true", "false"],
             description="Explicit real-hardware motor enable gate"),

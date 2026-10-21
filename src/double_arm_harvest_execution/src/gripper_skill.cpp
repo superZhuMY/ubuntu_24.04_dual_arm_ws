@@ -130,7 +130,9 @@ bool GripperSkill::command(
   }
   const auto handle = goal_future.get();
   if (!handle) {
-    recovery_required_->store(false);
+    // The response callback owns rejection cleanup. The acceptance future can
+    // become ready before that callback runs; clearing here would let its late
+    // cleanup race with a subsequent command's recovery flag.
     error = "gripper goal was rejected (check allow_motion and calibration)";
     return false;
   }

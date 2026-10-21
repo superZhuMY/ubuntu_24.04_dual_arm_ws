@@ -81,11 +81,13 @@ VALIDATE → PREPARE_GRIPPER（开爪）
 | 条件 | 软件处理 | 排查入口 |
 |---|---|---|
 | 有任务运行、无启用臂、启用臂 ID 空 / 重复、动作门控关闭、MoveGroup 未就绪 | 拒绝 goal | `TaskExecutor::accept_request()` |
-| 启用臂位姿非法、置信度不足、反馈缺失 / 过期 | 任务在 VALIDATE 或后续阶段失败 | `failure_policy.cpp`、当前状态检查 |
-| 规划失败或 J3 伸缩时其他关节偏离超限 | 终止任务，不进入下一阶段 | `MotionSkill` |
-| 某臂轨迹失败、接受超时或阶段超时 | 阶段失败并处理对端取消；迟到接受的 goal 也会被取消 | `trajectory_dispatcher.cpp`、阶段等待逻辑 |
+| 启用臂位姿非法、置信度不足、反馈缺失 / 过期 | 已接受的任务在 VALIDATE 或后续阶段进入 PAUSED | `failure_policy.cpp`、当前状态检查 |
+| 规划失败或 J3 伸缩时其他关节偏离超限 | 保持任务 PAUSED，不进入下一阶段 | `MotionSkill` |
+| 某臂轨迹失败、接受超时或阶段超时 | 处理对端取消并进入 PAUSED；迟到接受的 goal 也会被取消 | `trajectory_dispatcher.cpp`、阶段等待逻辑 |
 | streaming 状态过期、无进展或单段超时 | 中止轨迹 Action，尝试保持最新反馈位置 | `StreamingTrajectoryExecutor::_execute()` |
 | 客户端取消 | 取消当前阶段，尝试结束为 CANCELED；状态转换竞态有 abort 回退 | 采摘取消回调及 `finish_canceled` |
+
+暂停任务需人工取消后才可重新提交；如果下游取消未确认，任务取消后仍保持恢复门禁，直到收到下游终态或目标拒绝。新旧任务入口共用该门禁。
 
 成功要求启用臂完成全部阶段，包括 HOME 后松爪。总失败结果不能用来推断另一臂完全没有运动；软件取消与保持也不能证明实际电机瞬时停止。夹爪原始命令数值不是独立的实际开口传感器反馈。
 

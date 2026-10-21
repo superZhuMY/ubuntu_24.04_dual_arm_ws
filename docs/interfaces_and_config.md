@@ -78,3 +78,5 @@ MCU target   = zero_offset + direction × ROS target
 旧 harvest launch 使用节点名 YAML 覆盖执行器参数，因为普通 launch 参数字典产生的通配配置可能无法覆盖 `harvest_motion.yaml` 的节点专用参数。统一 `robot.launch.py` 只配置运行模式和硬件使能，不选择采摘或打叶；新任务类型只从 `/execute_task` Goal 读取。
 
 默认值应以所列配置和 launch 为准；改变参数后只更新本专题中的参数表，总览与架构文档通过链接引用。真实夹爪接线与标定步骤见[双夹爪集成说明](dual_gripper_integration.md)。
+
+已接受任务在 VALIDATE、规划、运动或夹爪阶段失败后反馈 `state=PAUSED`，`current_stage` 保留原失败阶段；分臂阶段为 `PAUSED`。暂停不自动重试、回 HOME 或松爪。取消任务后，如果下游尚未终止，统一接口返回 `error_code=RECOVERY_REQUIRED`，新旧入口均继续拒绝任务，直到下游终态/拒绝被确认。

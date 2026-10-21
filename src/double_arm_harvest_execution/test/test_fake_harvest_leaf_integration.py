@@ -80,12 +80,15 @@ class FakeTaskIntegration(unittest.TestCase):
         goal.execute_right = right
         return goal
 
-    def _send_goal(self, goal, accept_timeout=120.0, cancel_on_gripper=False):
+    def _send_goal(self, goal, accept_timeout=120.0, cancel_on_gripper=False,
+                   cancel_on_pause=False):
         deadline = time.monotonic() + accept_timeout
         cancellation = {"handle": None, "stage_seen": False, "future": None}
 
         def feedback_callback(msg):
-            if not cancel_on_gripper or msg.feedback.message != "opening enabled grippers":
+            trigger = (cancel_on_gripper and msg.feedback.message == "opening enabled grippers") or (
+                cancel_on_pause and msg.feedback.state == "PAUSED")
+            if not trigger:
                 return
             cancellation["stage_seen"] = True
             if cancellation["handle"] is not None and cancellation["future"] is None:
@@ -149,9 +152,10 @@ class FakeTaskIntegration(unittest.TestCase):
             self.assertEqual(wrapped.result.right_success, right)
 
         failed = self._send_goal(
-            self._goal("tomato_pick", left=True, right=False, unreachable_left=True))
+            self._goal("tomato_pick", left=True, right=False, unreachable_left=True),
+            cancel_on_pause=True)
         failure_result = self._wait_result(failed)
-        self.assertEqual(failure_result.status, GoalStatus.STATUS_ABORTED)
+        self.assertEqual(failure_result.status, GoalStatus.STATUS_CANCELED)
         self.assertFalse(failure_result.result.success)
         self.assertEqual(failure_result.result.failed_stage, "APPROACH")
 

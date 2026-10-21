@@ -100,8 +100,8 @@ ros2 run double_arm_harvest_execution send_manual_harvest_goal.py --task-type le
 
 ```bash
 ros2 launch double_arm_bringup robot.launch.py mode:=fake
-ros2 launch double_arm_bringup robot.launch.py mode:=readonly stm32_device:=/dev/ttyUSB0
-ros2 launch double_arm_bringup robot.launch.py mode:=real stm32_device:=/dev/ttyUSB0
+ros2 launch double_arm_bringup robot.launch.py mode:=readonly
+ros2 launch double_arm_bringup robot.launch.py mode:=real
 ```
 
 `fake` 启动 mock 硬件、MoveIt、任务执行器和模拟夹爪。`readonly` 只启动 STM32
@@ -207,15 +207,18 @@ ros2 run double_arm_harvest_execution send_manual_harvest_goal.py \
 
 ### 阶段失败后暂停
 
-采摘阶段失败时，执行器输出 `PAUSED`，保留当前任务、失败原因和进度，停止后续
+已接受任务在 VALIDATE 校验或后续阶段失败时，执行器输出 `PAUSED`，保留当前任务、失败原因和进度，停止后续
 阶段并拒绝新采摘任务；不自动重试、不回 HOME、不自动松爪。该暂停不改变 STM32
 反馈过期、目标拒绝等底层保护，也不保证失联后机械臂能保持原位。
 
 最小实现没有断点继续接口。处理现场问题后，先取消暂停任务：
 
 ```bash
-ros2 service call /execute_dual_harvest/_action/cancel_goal action_msgs/srv/CancelGoal '{}'
+ros2 service call /execute_task/_action/cancel_goal action_msgs/srv/CancelGoal '{}'
 ```
+
+旧入口任务使用 `/execute_dual_harvest/_action/cancel_goal` 取消。两种入口共用忙碌锁；
+如果下游取消未确认，新任务仍会被拒绝，直到下游报告终态或拒绝目标。
 
 确认取消完成、反馈和控制器恢复后，人工重新提交目标；新任务从 VALIDATE 开始，
 不会接着失败阶段执行。仅修改 YAML 不会改变已经暂停的 goal；仅退出发送脚本也

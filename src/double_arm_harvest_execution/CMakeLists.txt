@@ -102,6 +102,7 @@ if(BUILD_TESTING)
   target_link_libraries(test_task_behavior harvest_core)
 
   ament_add_pytest_test(test_manual_target_conversion test/test_manual_target_conversion.py)
+  ament_add_pytest_test(test_manual_task_sender test/test_manual_task_sender.py)
 
   ament_add_gtest(test_gripper_skill test/test_gripper_skill.cpp)
   target_include_directories(test_gripper_skill PRIVATE include)
@@ -110,6 +111,7 @@ if(BUILD_TESTING)
   find_package(launch_testing_ament_cmake REQUIRED)
   add_launch_test(test/test_fake_harvest_integration.py TIMEOUT "600")
   add_launch_test(test/test_fake_harvest_leaf_integration.py TIMEOUT "600")
+  add_launch_test(test/test_task_recovery_integration.py TIMEOUT "600")
   add_launch_test(test/test_fake_harvest_pause.py TIMEOUT "180")
 endif()
 

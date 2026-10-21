@@ -53,14 +53,14 @@
 
 **Inputs:** /home/zmy/tomato/ubuntu_24.04_dual_arm_ws and /home/zmy/.codex/worktrees/b670/ubuntu_24.04_dual_arm_ws, both based on 8f0462c.
 
-- [ ] Record input HEADs and hashes of selected tracked/untracked source and documentation files.
-- [ ] Create reproducible source snapshots using a temporary Git index; leave original branches, indexes, and working files untouched.
-- [ ] Include src, docs, and README changes using the explicit exclusions above. Include every hardware preservation manifest file; record hashes and the required values. Classify additional changed/untracked files individually in the ledger.
-- [ ] Record snapshot commit IDs and selected paths in an integration ledger.
-- [ ] Verify both snapshot parents/common base are 8f0462c before application. If input HEADs changed, record and review the changed merge base before applying anything; never silently assume the old base.
-- [ ] Merge the hardware snapshot's delta, then the refactor snapshot's delta, into the existing integration branch with three-way Git merges. Preserve the current integration branch as ours; source snapshots are theirs. Do not use recursive directory copying or blanket ours/theirs conflict resolution.
-- [ ] For each conflict, ledger the path, base/ours/theirs IDs, behavior selected, reason, and test that proves the resolution. Pay particular attention to stm32_backend.hpp, executor/CLI failure handling, interface generation, and launch defaults.
-- [ ] Verify 454c4b5 and 68b955d remain ancestors; keep shutdown-cleanup, immutable in-flight snapshot, ACK-timeout retry, and optional-textures behavior as explicit regression checks after merging.
+- [x] Record input HEADs and hashes of selected tracked/untracked source and documentation files.
+- [x] Create reproducible source snapshots using a temporary Git index; leave original branches, indexes, and working files untouched.
+- [x] Include src, docs, and README changes using the explicit exclusions above. Include every hardware preservation manifest file; record hashes and the required values. Classify additional changed/untracked files individually in the ledger.
+- [x] Record snapshot commit IDs and selected paths in an integration ledger.
+- [x] Verify both snapshot parents/common base are 8f0462c before application. If input HEADs changed, record and review the changed merge base before applying anything; never silently assume the old base.
+- [x] Merge the hardware snapshot's delta, then the refactor snapshot's delta, into the existing integration branch with three-way Git merges. Preserve the current integration branch as ours; source snapshots are theirs. Do not use recursive directory copying or blanket ours/theirs conflict resolution.
+- [x] For each conflict, ledger the path, base/ours/theirs IDs, behavior selected, reason, and test that proves the resolution. Pay particular attention to stm32_backend.hpp, executor/CLI failure handling, interface generation, and launch defaults.
+- [x] Verify 454c4b5 and 68b955d remain ancestors; keep shutdown-cleanup, immutable in-flight snapshot, ACK-timeout retry, and optional-textures behavior as explicit regression checks after merging.
 
 **Acceptance:** Both input working states and indexes remain unchanged; selected source files are represented in reachable snapshot commits. Both source deltas are reconciled against 8f0462c, conflict choices are documented, and neither existing integration repair is overwritten.
 
@@ -80,18 +80,18 @@ Paths below are repository-relative and must be retained from the hardware snaps
 | src/double_arm_end_effector/launch/gripper_calibration.launch.py and src/double_arm_end_effector/launch/dual_gripper.launch.py | Preserve calibration/raw/register-read entry points and reconcile their defaults/forwarding with the YAML and motion gates. |
 | src/double_arm_harvest_execution/config/manual_targets.yaml | Preserve hardware workspace target coordinates/orientations as captured in the snapshot; adapt conversion to TaskTarget without changing the numeric poses. |
 
-- [ ] Record the original hashes and parsed values of all manifest files. For newly introduced src/double_arm_bringup/launch/robot.launch.py, ensure its defaults and forwarding agree with this manifest instead of reintroducing /dev/ttyUSB0 or old register/calibration values.
-- [ ] Resolve the full real launch parameter chain in a non-actuating test: unified bringup -> harvest -> STM32/xacro and gripper node. Assert the effective devices, slave/register IDs, open/closed values, baud rates, calibrated directions, and closed motion gates, not only text in individual files.
-- [ ] Exercise explicit test device overrides and confirm they reach both the appropriate node and robot_description. Do not open real devices or install udev rules during these tests.
+- [x] Record the original hashes and parsed values of all manifest files. For newly introduced src/double_arm_bringup/launch/robot.launch.py, ensure its defaults and forwarding agree with this manifest instead of reintroducing /dev/ttyUSB0 or old register/calibration values.
+- [x] Resolve the full real launch parameter chain in a non-actuating test: unified bringup -> harvest -> STM32/xacro and gripper node. Assert the effective devices, slave/register IDs, open/closed values, baud rates, calibrated directions, and closed motion gates, not only text in individual files.
+- [x] Exercise explicit test device overrides and confirm they reach both the appropriate node and robot_description. Do not open real devices or install udev rules during these tests.
 
 ## Task 2: Integrate interfaces and hardware support
 
 **Files:** double_arm_harvest_interfaces, double_arm_end_effector, double_arm_hardware, current robot xacro configuration.
 
-- [ ] Combine ExecuteTask, TaskTarget, DetectedTarget, raw DualGripperCommand fields, and ReadGripperRegisters without dropping existing fields.
-- [ ] Retain current gripper mapping, calibration tools, and STM32 pause/hold behavior.
-- [ ] Run interface schema, raw gripper action, mapping, STM32 backend, and hardware lifecycle tests.
-- [ ] Commit the coherent interface/hardware integration.
+- [x] Combine ExecuteTask, TaskTarget, DetectedTarget, raw DualGripperCommand fields, and ReadGripperRegisters without dropping existing fields.
+- [x] Retain current gripper mapping, calibration tools, and STM32 pause/hold behavior.
+- [x] Run interface schema, raw gripper action, mapping, STM32 backend, and hardware lifecycle tests.
+- [x] Commit the coherent interface/hardware integration.
 
 **Acceptance:** Interface generation and all affected consumers compile together; raw/mock gripper tests and hardware tests pass without physical-device access.
 
@@ -99,14 +99,14 @@ Paths below are repository-relative and must be retained from the hardware snaps
 
 **Files:** TaskExecutor header/source, task_request, task_behavior, MotionSkill, GripperSkill, StageBarrier, associated tests; add src/double_arm_harvest_execution/test/test_task_recovery_integration.py and register it in the package CMakeLists.txt.
 
-- [ ] Adopt the shared task request, new/legacy action adapters, motion/gripper skills, and per-goal strategy selection.
-- [ ] Write failing tests for PAUSED feedback and busy-gate retention, then adapt the shared lifecycle to preserve hardware failure-pausing behavior, explicitly including accepted-task VALIDATE failures.
-- [ ] Implement the deterministic fault-injection acceptance matrix below for both action endpoints; observe a motion command or accepted downstream operation before injecting execution faults. Assert downstream cancellation/termination and absence of subsequent stage dispatches, rather than merely observing PAUSED text.
-- [ ] Test cancellation during acceptance, during motion, and while paused; unconfirmed termination must block the next task until a late terminal result arrives.
-- [ ] Test that goal_accept_timeout_sec ends acceptance waiting independently of stage_timeout_sec.
-- [ ] Retain the promise-based fast-gripper-result fix and its success/failure/rejection/late-result regression cases.
-- [ ] Test tomato -> leaf -> tomato, left-only/right-only requests with an empty disabled target, and no state leakage across requests.
-- [ ] Commit the verified executor integration.
+- [x] Adopt the shared task request, new/legacy action adapters, motion/gripper skills, and per-goal strategy selection.
+- [x] Write failing tests for PAUSED feedback and busy-gate retention, then adapt the shared lifecycle to preserve hardware failure-pausing behavior, explicitly including accepted-task VALIDATE failures.
+- [x] Implement the deterministic fault-injection acceptance matrix below for both action endpoints; observe a motion command or accepted downstream operation before injecting execution faults. Assert downstream cancellation/termination and absence of subsequent stage dispatches, rather than merely observing PAUSED text.
+- [x] Test cancellation during acceptance, during motion, and while paused; unconfirmed termination must block the next task until a late terminal result arrives.
+- [x] Test that goal_accept_timeout_sec ends acceptance waiting independently of stage_timeout_sec.
+- [x] Retain the promise-based fast-gripper-result fix and its success/failure/rejection/late-result regression cases.
+- [x] Test tomato -> leaf -> tomato, left-only/right-only requests with an empty disabled target, and no state leakage across requests.
+- [x] Commit the verified executor integration.
 
 **Acceptance:** All rows of the fault matrix pass for new and legacy entry points. VALIDATE failures pause; failures after motion starts cancel the peer and never advance/replay a stage. Both action endpoints remain blocked while the task is PAUSED or any downstream operation is unresolved. A new task is accepted only after the original task is canceled and every outstanding downstream operation has terminated or been rejected; both completion orderings are tested. No stale callback affects a later dispatch.
 
@@ -127,25 +127,33 @@ For every execution-fault row, assert that only allowed cancellation/hold operat
 
 **Files:** double_arm_bringup/launch/robot.launch.py, harvest_fake.launch.py, harvest_stm32.launch.py, stm32_moveit.launch.py, send_manual_harvest_goal.py, architecture/development/bringup/interface docs.
 
-- [ ] Combine current hardware device defaults with fake/readonly/real bringup and explicit real motion gates.
-- [ ] Keep per-goal task type selection and new target conversion in the CLI while preserving paused-result waiting and loop stop after unsuccessful outcomes.
-- [ ] Add/adjust launch tests for mode topology and locked real/readonly behavior, plus CLI tests for pause and failure handling.
-- [ ] Add src/double_arm_bringup/test/test_effective_bringup_parameters.py for the resolved hardware manifest and register it with the bringup package's test runner.
-- [ ] Run the manifest's effective-parameter checks through the final unified launch, including explicit device overrides; record final resolved values in the ledger.
-- [ ] Update examples and remove contradictory old task-mode, hardware mapping, and failure behavior descriptions.
-- [ ] Commit launch/CLI/documentation integration.
+- [x] Combine current hardware device defaults with fake/readonly/real bringup and explicit real motion gates.
+- [x] Keep per-goal task type selection and new target conversion in the CLI while preserving paused-result waiting and loop stop after unsuccessful outcomes.
+- [x] Add/adjust launch tests for mode topology and locked real/readonly behavior, plus CLI tests for pause and failure handling.
+- [x] Add src/double_arm_bringup/test/test_effective_bringup_parameters.py for the resolved hardware manifest and register it with the bringup package's test runner.
+- [x] Run the manifest's effective-parameter checks through the final unified launch, including explicit device overrides; record final resolved values in the ledger.
+- [x] Update examples and remove contradictory old task-mode, hardware mapping, and failure behavior descriptions.
+- [x] Commit launch/CLI/documentation integration.
 
 **Acceptance:** Documented commands resolve to the intended mode; no real device is opened by fake tests; readonly remains command-free.
 
 ## Task 5: Validate and merge locally
 
-- [ ] Build a clean source snapshot, including dependencies for double_arm_bringup, double_arm_hardware, double_arm_harvest_execution, double_arm_end_effector, and double_arm_sparse_execution. Select system Python and dependencies to avoid Miniconda library collisions.
-- [ ] Run all tests for affected packages with colcon test; inspect colcon test-result --verbose. Report every remaining failure by name.
-- [ ] Run fake integration covering legacy/new interfaces, both task types, single arms, serialization, pause/cancel, delayed acceptance/result, and subsequent recovery.
-- [ ] Require every fault-injection matrix row and every hardware manifest effective-parameter check to pass; a VALIDATE-only pause test does not satisfy motion-failure acceptance.
-- [ ] Verify 454c4b5 and 68b955d remain ancestors of the final integration commit and proposed main. Rerun both executor shutdown/SIGINT cases, InFlightSnapshotNotMutated, RetriesLatestTargetAfterAckTimeout, and clean install without textures; check an available textures directory is still installed. These are behavior checks, not source-text equality checks.
-- [ ] Obtain an independent whole-change review; fix substantive findings with regression tests and rerun affected checks.
-- [ ] Verify input workspaces remain unchanged, diff has no conflict markers/whitespace errors, and the integration branch is committed and clean.
+- [x] Build a clean source snapshot, including dependencies for double_arm_bringup, double_arm_hardware, double_arm_harvest_execution, double_arm_end_effector, and double_arm_sparse_execution. Select system Python and dependencies to avoid Miniconda library collisions.
+- [x] Run all tests for affected packages with colcon test; inspect colcon test-result --verbose. Report every remaining failure by name.
+- [x] Run fake integration covering legacy/new interfaces, both task types, single arms, serialization, pause/cancel, delayed acceptance/result, and subsequent recovery.
+- [x] Require every fault-injection matrix row and every hardware manifest effective-parameter check to pass; a VALIDATE-only pause test does not satisfy motion-failure acceptance.
+- [x] Verify 454c4b5 and 68b955d remain ancestors of the final integration commit and proposed main. Rerun both executor shutdown/SIGINT cases, InFlightSnapshotNotMutated, RetriesLatestTargetAfterAckTimeout, and clean install without textures; check an available textures directory is still installed. These are behavior checks, not source-text equality checks.
+- [x] Obtain an independent whole-change review; fix substantive findings with regression tests and rerun affected checks.
+- [x] Verify input workspaces remain unchanged, diff has no conflict markers/whitespace errors, and the integration branch is committed and clean.
 - [ ] Merge the verified integration into local main; preserve source branches/worktrees and report the final commit and test evidence. Do not push until separately authorized.
 
 **Acceptance:** Clean build and automated checks pass, review has no unresolved substantive findings, and local main contains the integrated changes. Physical robot execution and recalibration are explicitly unverified.
+
+## Execution evidence (2026-10-21)
+
+Both input snapshots were merged incrementally (hardware `0ad6113`, refactor `a495b8b`) and all conflict decisions are recorded in the integration ledger. Independent review found and resolved a gripper rejection cleanup race; the final follow-up review had no actionable findings.
+
+A fresh archive of the staged Git tree built all 9 packages with ROS 2 Jazzy and system Python. The complete sequential colcon run finished in 5m31s; `colcon test-result --verbose` reports **443 tests, 0 errors, 0 failures, 0 skipped**. This includes 15 hardware targets, the new/legacy task flows, 34 recovery fault subcases (each followed by a successful full task), effective hardware launch parameters and CLI pause handling. Both task and streaming executor processes exited cleanly during launch teardown. MoveIt's external move_group required launch teardown SIGTERM; no change to that dependency was made.
+
+The clean build/install succeeded without textures; a separate fixture containing a texture marker installed it successfully. Both original indexes and all 404 selected source file hashes remained unchanged. Commits `454c4b5` and `68b955d` remain ancestors. Physical execution, physical stopping and recalibration remain unverified. No remote push is part of this execution.

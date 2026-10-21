@@ -25,7 +25,7 @@ First-version roles preserve current behavior: tomato-pick enabled arms operate;
 - Preserve stage order: validate, open, approach, J3 pick stroke, close, J3 retreat, HOME, release.
 - Preserve single seeded IK, J3-only strokes, current feedback checks, MoveIt planning, shared-start dispatch, `TrajectoryDispatcher`, `StageBarrier`, and `FailurePolicy` utilities.
 - Leaf RETREAT keeps the existing right-first / left-delayed behavior; single-arm execution is never staggered.
-- Cancellation and failure stop stage advancement and cancel outstanding downstream goals. Do not automatically retry, return HOME, or open the gripper after a failure.
+- Failures of accepted tasks (including VALIDATE) enter PAUSED after canceling outstanding downstream goals. Keep the task active and reject new requests until the operator cancels; unresolved downstream goals keep recovery gates closed after task cancellation. Admission-time rejection remains rejection. Do not automatically retry, return HOME, or open the gripper after a failure.
 - Keep the task gate closed until downstream goals have reached terminal results; report timeout/recovery-required if cancellation is not confirmed.
 - Keep fake, readonly, and real launch topologies distinct. Readonly starts no motion controllers, task executor, or gripper command server. Real starts with motor and gripper enables disabled.
 - Keep vision, policy, reinforcement learning, and agents outside the executor. Future policy clients submit `ExecuteTask` goals and consume results.

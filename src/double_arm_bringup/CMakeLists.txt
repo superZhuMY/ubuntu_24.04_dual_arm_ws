@@ -8,6 +8,7 @@ install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 if(BUILD_TESTING)
   find_package(ament_cmake_pytest REQUIRED)
   ament_add_pytest_test(test_robot_launch_config test/test_robot_launch_config.py)
+  ament_add_pytest_test(test_effective_bringup_parameters test/test_effective_bringup_parameters.py)
 endif()
 
 ament_package()

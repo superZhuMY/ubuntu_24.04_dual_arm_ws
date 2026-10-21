@@ -3,13 +3,15 @@
 从 `~/tomato/test1` 分离出的活跃工程。**含可直接构建、已验证的源码**，已剔除历史 zip 快照与一次性参考资料。
 
 - 平台：Ubuntu 24.04 + ROS 2 Jazzy
-- 当前源码包含 8 个 ROS2 包；原有硬件包构建基线为 294 用例 / 0 失败
+- 当前源码包含 9 个 ROS2 包；原有硬件包构建基线为 294 用例 / 0 失败
 - 源码来源：`test1/src/`（与 `test1/src_v8.zip` 逐文件一致，零差异）
 
 工程文档入口：[项目总览](docs/project_overview.md)，由总览按需进入架构、接口配置和开发排障专题。
 
 当前 STM32 双臂、独立 RS485 夹爪、标定界面及 manual 采摘的启动步骤见
 [采摘启动与排障](docs/harvest_bringup.md)和[夹爪接入说明](docs/dual_gripper_integration.md)。
+统一入口为 `ros2 launch double_arm_bringup robot.launch.py mode:=fake|readonly|real`。
+任务通过 `/execute_task` 的 `task_type` 选择采摘或打叶；real 模式动作使能默认关闭。
 `harvest_stm32.launch.py` 已包含 MoveIt，启动前先退出旧的 `stm32_moveit` 或采摘
 launch，避免同名 controller_manager 导致控制器加载到错误实例。
 
@@ -22,6 +24,7 @@ launch，避免同名 controller_manager 导致控制器加载到错误实例。
 src/
   double_arm_hardware/            核心包：硬件插件 + 协议 + 传输层 + readonly_check
   double_arm_sparse_execution/    STM32 关键段执行 + 终点反馈确认（保留旧稀疏模式）
+  double_arm_bringup/             统一 fake / readonly / real 环境入口
   double_arm_harvest_interfaces/  双臂采摘与双夹爪 Action 接口
   double_arm_harvest_execution/   双臂采摘状态机 + MoveIt/夹爪同步屏障
   double_arm_end_effector/        RS485 Modbus RTU 双夹爪驱动

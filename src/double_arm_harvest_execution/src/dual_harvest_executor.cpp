@@ -741,12 +741,15 @@ void TaskExecutor::publish_stage_feedback(
   const std::string & right_stage,
   float left_progress,
   float right_progress,
-  const std::string & message)
+  const std::string & message,
+  const std::string & state,
+  const std::string & failed_stage)
 {
   ExecuteTask::Feedback feedback;
   feedback.task_id = task_id;
-  feedback.state = "RUNNING";
-  feedback.current_stage = !left_stage.empty() ? left_stage : right_stage;
+  feedback.state = state;
+  feedback.current_stage = !failed_stage.empty() ? failed_stage :
+    (!left_stage.empty() ? left_stage : right_stage);
   feedback.left_stage = left_stage;
   feedback.right_stage = right_stage;
   feedback.left_progress = left_progress;
@@ -929,26 +932,6 @@ void TaskExecutor::execute_request(const TaskRequest & request, const GoalCallba
     request.left_target.target_id, request.right_target.target_id,
     feedback_state_mutex_, active_feedback_publisher_};
 
-  auto fail = [&](const std::string & stage, const std::string & message) {
-      ExecuteTask::Result result;
-      result.task_id = task_id;
-      result.success = false;
-      result.left_success = false;
-      result.right_success = false;
-      result.failed_stage = stage;
-      const bool recovery_required = recovery_required_.load() ||
-        gripper_recovery_required_->load();
-      result.error_code = recovery_required ? "RECOVERY_REQUIRED" : "EXECUTION_FAILED";
-      result.message = recovery_required ?
-        message + "; downstream cancellation is not confirmed; new tasks are blocked" : message;
-      try {
-        callbacks.finish(result, GoalTermination::ABORTED);
-      } catch (const std::exception & ex) {
-        RCLCPP_ERROR(get_logger(), "[task=%s] abort transition failed: %s", task_id.c_str(), ex.what());
-      }
-      RCLCPP_ERROR(get_logger(), "[task=%s][%s] FAILED: %s",
-        task_id.c_str(), stage.c_str(), result.message.c_str());
-    };
   auto finish_canceled = [&](const std::string & stage) {
       ExecuteTask::Result result;
       result.task_id = task_id;
@@ -968,6 +951,32 @@ void TaskExecutor::execute_request(const TaskRequest & request, const GoalCallba
       }
       RCLCPP_WARN(get_logger(), "[task=%s][%s] CANCELED", task_id.c_str(), stage.c_str());
     };
+  const float disabled_progress = 0.0f;
+  float left_progress = 0.0f;
+  float right_progress = 0.0f;
+
+  auto fail = [&](const std::string & stage, const std::string & message) {
+      RCLCPP_WARN(get_logger(), "[task=%s][%s] PAUSED: %s; cancel before resubmitting",
+        task_id.c_str(), stage.c_str(), message.c_str());
+      publish_stage_feedback(
+        callbacks, task_id, left_enabled ? "PAUSED" : "", right_enabled ? "PAUSED" : "",
+        left_progress, right_progress, "paused at " + stage + ": " + message, "PAUSED", stage);
+      std::unique_lock<std::mutex> lock(stage_mutex_);
+      while (rclcpp::ok() && callbacks.is_active() && !cancel_requested_.load()) {
+        stage_cv_.wait_for(lock, std::chrono::milliseconds(200));
+      }
+      lock.unlock();
+      if (cancel_requested_.load()) {
+        finish_canceled(stage);
+      } else if (callbacks.is_active()) {
+        ExecuteTask::Result result;
+        result.task_id = task_id;
+        result.failed_stage = stage;
+        result.error_code = "SHUTDOWN";
+        result.message = "node shut down while paused: " + message;
+        callbacks.finish(result, GoalTermination::ABORTED);
+      }
+    };
   auto succeed = [&](const std::string & message) {
       ExecuteTask::Result result;
       result.task_id = task_id;
@@ -979,9 +988,6 @@ void TaskExecutor::execute_request(const TaskRequest & request, const GoalCallba
       RCLCPP_INFO(get_logger(), "[task=%s] SUCCEEDED: %s", task_id.c_str(), message.c_str());
     };
 
-  const float disabled_progress = 0.0f;
-  float left_progress = 0.0f;
-  float right_progress = 0.0f;
 
   // -----------------------------------------------------------------------
   // VALIDATE

@@ -169,7 +169,9 @@ private:
     const std::string & right_stage,
     float left_progress,
     float right_progress,
-    const std::string & message);
+    const std::string & message,
+    const std::string & state = "RUNNING",
+    const std::string & failed_stage = "");
 
   /// Republish the stored feedback state at 2 Hz while a task is active.
   void feedback_timer_tick();
