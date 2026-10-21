@@ -38,6 +38,18 @@ std::string validate_harvest_target(
   return "";
 }
 
+std::string validate_task_target(
+  const double_arm_harvest_interfaces::msg::TaskTarget & target,
+  const std::string & base_frame, double min_confidence)
+{
+  double_arm_harvest_interfaces::msg::HarvestTarget compatible;
+  compatible.target_id = target.target_id;
+  compatible.target_pose = target.tcp_pose;
+  compatible.confidence = target.confidence;
+  compatible.source = target.source;
+  return validate_harvest_target(compatible, base_frame, min_confidence);
+}
+
 bool TargetLedger::reserve(const std::string & target_id)
 {
   if (target_id.empty()) {

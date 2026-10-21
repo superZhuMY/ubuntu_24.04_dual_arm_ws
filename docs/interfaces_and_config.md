@@ -12,7 +12,8 @@
 
 | 名称 | 类型 | 用途 |
 |---|---|---|
-| `/execute_dual_harvest` | `double_arm_harvest_interfaces/action/ExecuteDualHarvest` | 采摘任务入口 |
+| `/execute_task` | `double_arm_harvest_interfaces/action/ExecuteTask` | 运行时任务入口：采摘或打叶 |
+| `/execute_dual_harvest` | `double_arm_harvest_interfaces/action/ExecuteDualHarvest` | 兼容旧客户端的过渡入口 |
 | `/dual_gripper/command` | `double_arm_harvest_interfaces/action/DualGripperCommand` | 指定启用侧及归一化开合位置 |
 | `/double_arm_robot/l_arm/follow_joint_trajectory` | `control_msgs/action/FollowJointTrajectory` | 左臂阶段轨迹 |
 | `/double_arm_robot/r_arm/follow_joint_trajectory` | 同上 | 右臂阶段轨迹 |
@@ -22,9 +23,9 @@
 | `/double_arm_robot/controller_manager` | controller_manager 服务集合 | 控制器加载与管理 |
 | `/check_state_validity` | `moveit_msgs/srv/GetStateValidity` | sparse 路径规划场景检查 |
 
-`ExecuteDualHarvest` goal 包含 `left_target`、`right_target`、`execute_left`、`execute_right`。每个 `HarvestTarget` 包含唯一 `target_id`、`PoseStamped target_pose`、`confidence`、`source`。位姿 frame 必须等于配置基坐标系（默认 `base_link`），四元数须有限且归一化，置信度在 `[0,1]` 且达到阈值。结果包含总成功状态、左右成功状态、首个失败阶段和说明；反馈提供阶段与进度。
+统一的 `ExecuteTask` Action 位于 `/execute_task`，Goal 含 `task_id`、`task_type`（`tomato_pick` 或 `leaf_remove`）、每臂 `TaskTarget`、执行臂开关和左右角色。`TaskTarget.tcp_pose` 是最终执行 TCP 位姿，另有目标 ID / 类型、时间戳、frame、置信度和来源。结果包含总成功状态、左右成功状态、首个失败阶段和原因；反馈提供当前阶段与总体 / 分臂进度。旧 `ExecuteDualHarvest` Action 仍在 `/execute_dual_harvest` 提供过渡兼容。
 
-接受 goal 时，左右 `target_id` 都要求非空且不能相同，即使其中一臂禁用，也需要为该侧提供独立 ID。启用臂的位姿和置信度在 VALIDATE 阶段检查；ID 合法、goal 被接受，不等于目标可规划或运动已经开始。任务成功时禁用臂的 `*_success` 为 false，调用方应结合 `execute_*` 判断。
+只有启用臂要求非空且唯一的 `target_id`。启用臂的位姿和置信度在 VALIDATE 阶段检查；ID 合法、goal 被接受，不等于目标可规划或运动已经开始。`left_success` / `right_success` 表示对应启用臂是否随整项任务完成；禁用臂或中止任务的臂为 false，调用方结合 `execute_*` 判断。视觉位置使用单独的 `DetectedTarget.detection_pose`；需经目标处理生成 `TaskTarget` 才能进入执行层。
 
 夹爪位置 `0.0` 为开、`1.0` 为闭。Action 结果中的 `left_pulse` / `right_pulse` 是兼容名称，当前实际保存原始 Modbus 数值。
 
@@ -74,6 +75,6 @@ MCU target   = zero_offset + direction × ROS target
 
 ### 2.4 参数覆盖
 
-harvest launch 使用以节点名为键的临时 YAML 覆盖 `task_mode`，因为普通 launch 参数字典产生的通配配置可能无法覆盖 `harvest_motion.yaml` 的节点专用参数。修改参数传递时需保留这一覆盖语义。
+旧 harvest launch 使用节点名 YAML 覆盖执行器参数，因为普通 launch 参数字典产生的通配配置可能无法覆盖 `harvest_motion.yaml` 的节点专用参数。统一 `robot.launch.py` 只配置运行模式和硬件使能，不选择采摘或打叶；新任务类型只从 `/execute_task` Goal 读取。
 
 默认值应以所列配置和 launch 为准；改变参数后只更新本专题中的参数表，总览与架构文档通过链接引用。真实夹爪接线与标定步骤见[双夹爪集成说明](dual_gripper_integration.md)。

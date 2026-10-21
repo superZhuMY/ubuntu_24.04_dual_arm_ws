@@ -11,7 +11,6 @@
 
 #include <moveit/move_group_interface/move_group_interface.hpp>
 #include <moveit/utils/moveit_error_code.hpp>
-#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <tf2_ros/buffer.hpp>
 #include <tf2_ros/transform_listener.hpp>
 
@@ -58,7 +57,7 @@ bool is_motion_stage(Stage stage)
 }
 
 template<typename T>
-T DualHarvestExecutor::get_or_declare(const std::string & name, const T & default_value)
+T TaskExecutor::get_or_declare(const std::string & name, const T & default_value)
 {
   if (!has_parameter(name)) {
     declare_parameter<T>(name, default_value);
@@ -66,7 +65,7 @@ T DualHarvestExecutor::get_or_declare(const std::string & name, const T & defaul
   return get_parameter(name).get_value<T>();
 }
 
-std::array<double, 3> DualHarvestExecutor::get_offset_param(const std::string & name)
+std::array<double, 3> TaskExecutor::get_offset_param(const std::string & name)
 {
   const auto values = get_or_declare<std::vector<double>>(name, {0.0, 0.0, 0.0});
   if (values.size() != 3 || !std::all_of(values.begin(), values.end(), [](double v) {
@@ -79,7 +78,7 @@ std::array<double, 3> DualHarvestExecutor::get_offset_param(const std::string & 
   return {values[0], values[1], values[2]};
 }
 
-DualHarvestExecutor::DualHarvestExecutor(const rclcpp::NodeOptions & options)
+TaskExecutor::TaskExecutor(const rclcpp::NodeOptions & options)
 : rclcpp::Node("dual_arm_harvest_executor", options)
 {
   base_frame_ = get_or_declare<std::string>("base_frame", "base_link");
@@ -98,6 +97,7 @@ DualHarvestExecutor::DualHarvestExecutor(const rclcpp::NodeOptions & options)
   goal_accept_timeout_sec_ = get_or_declare<double>("goal_accept_timeout_sec", 3.0);
   stage_timeout_sec_ = get_or_declare<double>("stage_timeout_sec", 30.0);
   cancel_timeout_sec_ = get_or_declare<double>("cancel_timeout_sec", 3.0);
+  allow_task_motion_ = get_or_declare<bool>("allow_task_motion", false);
 
   gripper_action_name_ = get_or_declare<std::string>(
     "gripper_action_name", "/dual_gripper/command");
@@ -111,13 +111,17 @@ DualHarvestExecutor::DualHarvestExecutor(const rclcpp::NodeOptions & options)
   left_j3_extend_axis_ = get_offset_param("left_j3_extend_axis");
   right_j3_extend_axis_ = get_offset_param("right_j3_extend_axis");
 
-  task_mode_ = get_or_declare<std::string>("task_mode", "tomato_pick");
+  const std::string legacy_task_type = get_or_declare<std::string>(
+    "legacy_task_type", "tomato_pick");
   leaf_left_retreat_delay_sec_ = get_or_declare<double>("leaf_left_retreat_delay_sec", 3.0);
   leaf_right_retreat_delay_sec_ = get_or_declare<double>("leaf_right_retreat_delay_sec", 0.0);
 
-  if (task_mode_ != "tomato_pick" && task_mode_ != "leaf") {
-    throw std::runtime_error("task_mode must be 'tomato_pick' or 'leaf'");
+  const auto parsed_legacy_type = parse_legacy_task_type(legacy_task_type);
+  if (!parsed_legacy_type) {
+    throw std::runtime_error(
+            "legacy_task_type must be 'tomato_pick', 'leaf', or 'leaf_remove'");
   }
+  legacy_task_type_ = *parsed_legacy_type;
   if (leaf_left_retreat_delay_sec_ < 0.0 || leaf_right_retreat_delay_sec_ < 0.0) {
     throw std::runtime_error("leaf retreat delays must be non-negative");
   }
@@ -163,10 +167,18 @@ DualHarvestExecutor::DualHarvestExecutor(const rclcpp::NodeOptions & options)
 
   action_server_ = rclcpp_action::create_server<ExecuteDualHarvest>(
     this, "execute_dual_harvest",
-    std::bind(&DualHarvestExecutor::on_goal, this, std::placeholders::_1,
+    std::bind(&TaskExecutor::on_legacy_goal, this, std::placeholders::_1,
     std::placeholders::_2),
-    std::bind(&DualHarvestExecutor::on_cancel, this, std::placeholders::_1),
-    std::bind(&DualHarvestExecutor::on_accepted, this, std::placeholders::_1),
+    std::bind(&TaskExecutor::on_legacy_cancel, this, std::placeholders::_1),
+    std::bind(&TaskExecutor::on_legacy_accepted, this, std::placeholders::_1),
+    rcl_action_server_get_default_options(),
+    server_cb_group_);
+  task_action_server_ = rclcpp_action::create_server<ExecuteTask>(
+    this, "/execute_task",
+    std::bind(&TaskExecutor::on_task_goal, this, std::placeholders::_1,
+    std::placeholders::_2),
+    std::bind(&TaskExecutor::on_task_cancel, this, std::placeholders::_1),
+    std::bind(&TaskExecutor::on_task_accepted, this, std::placeholders::_1),
     rcl_action_server_get_default_options(),
     server_cb_group_);
 
@@ -191,18 +203,20 @@ DualHarvestExecutor::DualHarvestExecutor(const rclcpp::NodeOptions & options)
   // long real-hardware stages (doc section 18: no per-callback spam).
   feedback_timer_ = create_wall_timer(
     std::chrono::milliseconds(500),
-    std::bind(&DualHarvestExecutor::feedback_timer_tick, this), state_cb_group_);
+    std::bind(&TaskExecutor::feedback_timer_tick, this), state_cb_group_);
 
   RCLCPP_INFO(
     get_logger(),
-    "manual dual-arm workflow ready: base=%s left=%s right=%s "
-    "sync_start=%.2fs min_conf=%.2f j3_stroke=%.3fm mode=%s leaf_retreat_L=%.2fs",
+    "task executor ready: actions=/execute_task,/execute_dual_harvest "
+    "legacy_type=%s task_motion=%s base=%s left=%s right=%s sync_start=%.2fs min_conf=%.2f "
+    "j3_stroke=%.3fm leaf_retreat_L=%.2fs",
+    task_type_name(legacy_task_type_).c_str(),
+    allow_task_motion_ ? "enabled" : "locked",
     base_frame_.c_str(), left_group_.c_str(), right_group_.c_str(),
-    sync_start_delay_sec_, min_confidence_, j3_extend_distance_,
-    task_mode_.c_str(), leaf_left_retreat_delay_sec_);
+    sync_start_delay_sec_, min_confidence_, j3_extend_distance_, leaf_left_retreat_delay_sec_);
 }
 
-DualHarvestExecutor::~DualHarvestExecutor()
+TaskExecutor::~TaskExecutor()
 {
   // reset before members with incomplete types are destroyed
   tf_listener_.reset();
@@ -211,7 +225,7 @@ DualHarvestExecutor::~DualHarvestExecutor()
   right_arm_.reset();
 }
 
-void DualHarvestExecutor::init_move_groups()
+void TaskExecutor::init_move_groups()
 {
   try {
     left_arm_ = std::make_unique<moveit::planning_interface::MoveGroupInterface>(
@@ -223,6 +237,9 @@ void DualHarvestExecutor::init_move_groups()
     return;
   }
   planning_frame_ = left_arm_->getPlanningFrame();
+  motion_skill_ = std::make_unique<MotionSkill>(
+    *tf_buffer_, planning_frame_, get_logger(), planning_time_sec_, velocity_scale_,
+    acceleration_scale_, j3_stroke_tolerance_);
 
   TrajectoryDispatcher::Hooks hooks;
   hooks.on_goal_response = [this](uint64_t dispatch_id, bool left, bool accepted) {
@@ -231,6 +248,12 @@ void DualHarvestExecutor::init_move_groups()
         return;
       }
       barrier_.on_goal_response(left ? StageBarrier::LEFT : StageBarrier::RIGHT, accepted);
+      if (recovery_required_.load() &&
+        !barrier_.needs_cancel(StageBarrier::LEFT) &&
+        !barrier_.needs_cancel(StageBarrier::RIGHT))
+      {
+        recovery_required_.store(false);
+      }
       stage_cv_.notify_all();
     };
   hooks.on_result = [this](uint64_t dispatch_id, bool left, bool success,
@@ -241,6 +264,13 @@ void DualHarvestExecutor::init_move_groups()
       }
       barrier_.on_result(left ? StageBarrier::LEFT : StageBarrier::RIGHT, success);
       (left ? last_left_error_ : last_right_error_) = success ? "" : error;
+      if (recovery_required_.load() &&
+        !barrier_.needs_cancel(StageBarrier::LEFT) &&
+        !barrier_.needs_cancel(StageBarrier::RIGHT))
+      {
+        recovery_required_.store(false);
+        RCLCPP_INFO(get_logger(), "downstream arm goals have terminated; task gate reopened");
+      }
       stage_cv_.notify_all();
     };
   dispatcher_ = std::make_shared<TrajectoryDispatcher>(
@@ -262,6 +292,9 @@ void DualHarvestExecutor::init_move_groups()
   }
   RCLCPP_INFO(
     get_logger(), "gripper action connected: %s", gripper_action_name_.c_str());
+  gripper_skill_ = std::make_unique<GripperSkill>(
+    gripper_client_, stage_mutex_, cancel_requested_, gripper_action_timeout_sec_,
+    cancel_timeout_sec_, gripper_recovery_required_);
 
   move_groups_ready_ = true;
   RCLCPP_INFO(
@@ -272,159 +305,128 @@ void DualHarvestExecutor::init_move_groups()
     planning_frame_.c_str());
 }
 
-bool DualHarvestExecutor::run_gripper_command(
+bool TaskExecutor::run_gripper_command(
   bool left_enabled, bool right_enabled, double position, std::string & error)
 {
-  if (!gripper_client_) {
-    error = "gripper action client is not initialized";
+  if (!gripper_skill_) {
+    error = "gripper skill is not initialized";
     return false;
   }
-
-  DualGripperCommand::Goal goal;
-  goal.command_left = left_enabled;
-  goal.command_right = right_enabled;
-  goal.left_position = static_cast<float>(position);
-  goal.right_position = static_cast<float>(position);
-  goal.duration_ms = static_cast<uint32_t>(gripper_duration_ms_);
-
-  const auto deadline = std::chrono::steady_clock::now() +
-    std::chrono::duration<double>(gripper_action_timeout_sec_);
-  // Keep cancellation with this request, including after this function has
-  // returned. A delayed acceptance must not outlive a canceled harvest task.
-  using GripperGoalHandle = rclcpp_action::ClientGoalHandle<DualGripperCommand>;
-  struct GripperRequest
-  {
-    std::mutex mutex;
-    bool cancel_requested{false};
-    GripperGoalHandle::SharedPtr handle;
-  };
-  const auto request = std::make_shared<GripperRequest>();
-  const auto client = gripper_client_;
-  const std::weak_ptr<rclcpp_action::Client<DualGripperCommand>> weak_client = client;
-  const auto send_cancel = [weak_client](const GripperGoalHandle::SharedPtr & handle) {
-      if (const auto client = weak_client.lock(); client && handle) {
-        try {
-          (void)client->async_cancel_goal(handle);
-        } catch (const rclcpp_action::exceptions::UnknownGoalHandleError &) {
-          // A concurrent terminal result already retired this client handle.
-        }
-      }
-    };
-  const auto cancel_request = [request, send_cancel]() {
-      GripperGoalHandle::SharedPtr handle;
-      {
-        std::lock_guard<std::mutex> lock(request->mutex);
-        request->cancel_requested = true;
-        handle = request->handle;
-      }
-      send_cancel(handle);
-    };
-  rclcpp_action::Client<DualGripperCommand>::SendGoalOptions options;
-  options.goal_response_callback =
-    [request, send_cancel](const GripperGoalHandle::SharedPtr & handle) {
-      bool cancel_requested;
-      {
-        std::lock_guard<std::mutex> lock(request->mutex);
-        request->handle = handle;
-        cancel_requested = request->cancel_requested;
-      }
-      if (handle && cancel_requested) {
-        send_cancel(handle);
-      }
-    };
-  std::shared_future<GripperGoalHandle::SharedPtr> goal_future;
-  {
-    std::lock_guard<std::mutex> lock(stage_mutex_);
-    if (cancel_requested_.load()) {
-      error = "canceled before sending gripper goal";
-      return false;
-    }
-    goal_future = client->async_send_goal(goal, options);
-  }
-  while (goal_future.wait_for(std::chrono::milliseconds(50)) != std::future_status::ready) {
-    if (cancel_requested_.load()) {
-      cancel_request();
-      error = "canceled while waiting for gripper goal acceptance";
-      return false;
-    }
-    if (std::chrono::steady_clock::now() >= deadline) {
-      cancel_request();
-      error = "gripper action did not accept the goal before timeout";
-      return false;
-    }
-  }
-  const auto gripper_goal = goal_future.get();
-  if (!gripper_goal) {
-    error = "gripper goal was rejected (check allow_motion and calibration)";
-    return false;
-  }
-
-  auto result_future = gripper_client_->async_get_result(gripper_goal);
-  while (result_future.wait_for(std::chrono::milliseconds(50)) != std::future_status::ready) {
-    if (cancel_requested_.load()) {
-      cancel_request();
-      error = "canceled while moving grippers";
-      return false;
-    }
-    if (std::chrono::steady_clock::now() >= deadline) {
-      cancel_request();
-      error = "gripper action timed out and was canceled";
-      return false;
-    }
-  }
-
-  if (cancel_requested_.load()) {
-    cancel_request();
-    error = "canceled while moving grippers";
-    return false;
-  }
-  const auto wrapped = result_future.get();
-  if (wrapped.code != rclcpp_action::ResultCode::SUCCEEDED || !wrapped.result ||
-    !wrapped.result->success)
-  {
-    error = wrapped.result ? wrapped.result->message : "gripper action returned no result";
-    return false;
-  }
-  return true;
+  return gripper_skill_->command(
+    left_enabled, right_enabled, position, static_cast<uint32_t>(gripper_duration_ms_), error);
 }
 
 // ---------------------------------------------------------------------------
 // action server callbacks
 // ---------------------------------------------------------------------------
 
-rclcpp_action::GoalResponse DualHarvestExecutor::on_goal(
+rclcpp_action::GoalResponse TaskExecutor::on_legacy_goal(
   const rclcpp_action::GoalUUID & /*uuid*/, std::shared_ptr<const HarvestGoal> goal)
+{
+  TaskRequest request;
+  request.task_id = "legacy-pending";
+  request.task_type = legacy_task_type_;
+  request.execute_left = goal->execute_left;
+  request.execute_right = goal->execute_right;
+  const auto copy_target = [](const auto & source, auto & destination) {
+      destination.target_id = source.target_id;
+      destination.target_type = "unknown";
+      destination.tcp_pose = source.target_pose;
+      destination.confidence = source.confidence;
+      destination.source = source.source;
+    };
+  copy_target(goal->left_target, request.left_target);
+  copy_target(goal->right_target, request.right_target);
+  const auto role_error = resolve_arm_roles(
+    request.task_type, request.execute_left, request.execute_right, "", "", request.roles);
+  if (role_error) {
+    RCLCPP_WARN(get_logger(), "Rejecting legacy goal: %s", role_error->c_str());
+    return rclcpp_action::GoalResponse::REJECT;
+  }
+  return accept_request(request);
+}
+
+rclcpp_action::GoalResponse TaskExecutor::on_task_goal(
+  const rclcpp_action::GoalUUID & /*uuid*/, std::shared_ptr<const TaskGoal> goal)
+{
+  const auto type = parse_task_type(goal->task_type);
+  if (!type) {
+    RCLCPP_WARN(get_logger(), "Rejecting task goal: unsupported task_type '%s'",
+      goal->task_type.c_str());
+    return rclcpp_action::GoalResponse::REJECT;
+  }
+  TaskRequest request;
+  request.task_id = goal->task_id;
+  request.task_type = *type;
+  request.left_target = goal->left_target;
+  request.right_target = goal->right_target;
+  request.execute_left = goal->execute_left;
+  request.execute_right = goal->execute_right;
+  const auto role_error = resolve_arm_roles(
+    request.task_type, request.execute_left, request.execute_right,
+    goal->left_role, goal->right_role, request.roles);
+  if (role_error) {
+    RCLCPP_WARN(get_logger(), "Rejecting task goal: %s", role_error->c_str());
+    return rclcpp_action::GoalResponse::REJECT;
+  }
+  return accept_request(request);
+}
+
+rclcpp_action::GoalResponse TaskExecutor::accept_request(const TaskRequest & request)
 {
   std::lock_guard<std::mutex> lock(goal_gate_mutex_);
   if (busy_) {
-    RCLCPP_WARN(get_logger(), "Rejecting goal: another harvest task is active");
+    RCLCPP_WARN(get_logger(), "Rejecting goal: another task is active");
     return rclcpp_action::GoalResponse::REJECT;
   }
-  if (!goal->execute_left && !goal->execute_right) {
+  if (!allow_task_motion_) {
+    RCLCPP_WARN(get_logger(), "Rejecting goal: allow_task_motion is false");
+    return rclcpp_action::GoalResponse::REJECT;
+  }
+  if (recovery_required_.load()) {
+    RCLCPP_WARN(get_logger(), "Rejecting goal: canceled motion has not reached a terminal result");
+    return rclcpp_action::GoalResponse::REJECT;
+  }
+  if (gripper_recovery_required_->load()) {
+    RCLCPP_WARN(get_logger(), "Rejecting goal: gripper action has not reached a terminal result");
+    return rclcpp_action::GoalResponse::REJECT;
+  }
+  if (request.task_id.empty()) {
+    RCLCPP_WARN(get_logger(), "Rejecting goal: empty task_id");
+    return rclcpp_action::GoalResponse::REJECT;
+  }
+  if (!request.execute_left && !request.execute_right) {
     RCLCPP_WARN(get_logger(), "Rejecting goal: neither arm is enabled");
     return rclcpp_action::GoalResponse::REJECT;
   }
-  if (goal->left_target.target_id.empty() || goal->right_target.target_id.empty()) {
-    RCLCPP_WARN(get_logger(), "Rejecting goal: empty target_id");
+  if ((request.execute_left && request.left_target.target_id.empty()) ||
+    (request.execute_right && request.right_target.target_id.empty()))
+  {
+    RCLCPP_WARN(get_logger(), "Rejecting goal: enabled arm target has empty target_id");
     return rclcpp_action::GoalResponse::REJECT;
   }
   if (!move_groups_ready_) {
     RCLCPP_WARN(get_logger(), "Rejecting goal: move groups are not ready");
     return rclcpp_action::GoalResponse::REJECT;
   }
-  if (!target_ledger_.reserve(goal->left_target.target_id) ||
-    !target_ledger_.reserve(goal->right_target.target_id))
-  {
-    RCLCPP_WARN(
-      get_logger(), "Rejecting goal: duplicate target_id (left=%s right=%s)",
-      goal->left_target.target_id.c_str(), goal->right_target.target_id.c_str());
-    target_ledger_.release(goal->left_target.target_id);
-    target_ledger_.release(goal->right_target.target_id);
+
+  bool left_reserved = false;
+  if (request.execute_left) {
+    left_reserved = target_ledger_.reserve(request.left_target.target_id);
+    if (!left_reserved) {
+      RCLCPP_WARN(get_logger(), "Rejecting goal: left target_id is already active");
+      return rclcpp_action::GoalResponse::REJECT;
+    }
+  }
+  if (request.execute_right && !target_ledger_.reserve(request.right_target.target_id)) {
+    if (left_reserved) {
+      target_ledger_.release(request.left_target.target_id);
+    }
+    RCLCPP_WARN(get_logger(), "Rejecting goal: right target_id is already active");
     return rclcpp_action::GoalResponse::REJECT;
   }
+
   busy_ = true;
-  // The busy gate guarantees the previous task is fully finished, so a stale
-  // cancel flag from it must never leak into this task.
   {
     std::lock_guard<std::mutex> stage_lock(stage_mutex_);
     active_dispatch_id_ = 0;
@@ -433,35 +435,109 @@ rclcpp_action::GoalResponse DualHarvestExecutor::on_goal(
   return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
 }
 
-rclcpp_action::CancelResponse DualHarvestExecutor::on_cancel(
+rclcpp_action::CancelResponse TaskExecutor::on_legacy_cancel(
   const std::shared_ptr<GoalHandleHarvest> /*goal_handle*/)
 {
-  RCLCPP_WARN(get_logger(), "Cancel requested for the active harvest task");
-  {
-    std::lock_guard<std::mutex> lock(stage_mutex_);
-    cancel_requested_.store(true);
-    barrier_.request_cancel();
-    stage_cv_.notify_all();
-  }
+  request_cancel();
   return rclcpp_action::CancelResponse::ACCEPT;
 }
 
-void DualHarvestExecutor::on_accepted(const std::shared_ptr<GoalHandleHarvest> goal_handle)
+rclcpp_action::CancelResponse TaskExecutor::on_task_cancel(
+  const std::shared_ptr<GoalHandleTask> /*goal_handle*/)
 {
-  // Runs on a MultiThreadedExecutor thread; blocks for the whole task. The
-  // reentrant server group keeps goal/cancel callbacks alive meanwhile.
-  // Nothing may escape: a destroyed goal handle that never reached a terminal
-  // state makes rclcpp_action try to cancel it in its destructor, which can
-  // throw and kill the process.
+  request_cancel();
+  return rclcpp_action::CancelResponse::ACCEPT;
+}
+
+void TaskExecutor::request_cancel()
+{
+  RCLCPP_WARN(get_logger(), "Cancel requested for the active task");
+  std::lock_guard<std::mutex> lock(stage_mutex_);
+  cancel_requested_.store(true);
+  barrier_.request_cancel();
+  stage_cv_.notify_all();
+}
+
+TaskRequest TaskExecutor::convert_legacy_goal(const HarvestGoal & goal)
+{
+  TaskRequest request;
+  request.task_id = "legacy-" + std::to_string(++legacy_task_counter_);
+  request.task_type = legacy_task_type_;
+  request.execute_left = goal.execute_left;
+  request.execute_right = goal.execute_right;
+  const auto copy_target = [](const auto & source, auto & destination) {
+      destination.target_id = source.target_id;
+      destination.target_type = "unknown";
+      destination.tcp_pose = source.target_pose;
+      destination.confidence = source.confidence;
+      destination.source = source.source;
+    };
+  copy_target(goal.left_target, request.left_target);
+  copy_target(goal.right_target, request.right_target);
+  const auto error = resolve_arm_roles(
+    request.task_type, request.execute_left, request.execute_right, "", "", request.roles);
+  if (error) {
+    throw std::runtime_error(*error);
+  }
+  return request;
+}
+
+TaskRequest TaskExecutor::convert_task_goal(const TaskGoal & goal)
+{
+  TaskRequest request;
+  request.task_id = goal.task_id;
+  const auto type = parse_task_type(goal.task_type);
+  if (!type) {
+    throw std::runtime_error("unsupported task_type '" + goal.task_type + "'");
+  }
+  request.task_type = *type;
+  request.left_target = goal.left_target;
+  request.right_target = goal.right_target;
+  request.execute_left = goal.execute_left;
+  request.execute_right = goal.execute_right;
+  const auto error = resolve_arm_roles(
+    request.task_type, request.execute_left, request.execute_right,
+    goal.left_role, goal.right_role, request.roles);
+  if (error) {
+    throw std::runtime_error(*error);
+  }
+  return request;
+}
+
+void TaskExecutor::on_legacy_accepted(const std::shared_ptr<GoalHandleHarvest> goal_handle)
+{
   try {
     execute(goal_handle);
   } catch (const std::exception & ex) {
-    RCLCPP_ERROR(get_logger(), "harvest task crashed: %s", ex.what());
-    auto result = std::make_shared<ExecuteDualHarvest::Result>();
+    RCLCPP_ERROR(get_logger(), "legacy task crashed: %s", ex.what());
+    ExecuteTask::Result result;
+    result.success = false;
+    result.failed_stage = "INTERNAL";
+    result.error_code = "INTERNAL_ERROR";
+    result.message = std::string("internal error: ") + ex.what();
+    auto legacy = std::make_shared<ExecuteDualHarvest::Result>();
+    legacy->success = result.success;
+    legacy->failed_stage = result.failed_stage;
+    legacy->message = result.message;
+    try {
+      goal_handle->abort(legacy);
+    } catch (const std::exception & inner) {
+      RCLCPP_ERROR(get_logger(), "abort() after crash also failed: %s", inner.what());
+    }
+  }
+}
+
+void TaskExecutor::on_task_accepted(const std::shared_ptr<GoalHandleTask> goal_handle)
+{
+  try {
+    execute(goal_handle);
+  } catch (const std::exception & ex) {
+    RCLCPP_ERROR(get_logger(), "task crashed: %s", ex.what());
+    auto result = std::make_shared<ExecuteTask::Result>();
+    result->task_id = goal_handle->get_goal()->task_id;
     result->success = false;
-    result->left_success = false;
-    result->right_success = false;
     result->failed_stage = "INTERNAL";
+    result->error_code = "INTERNAL_ERROR";
     result->message = std::string("internal error: ") + ex.what();
     try {
       goal_handle->abort(result);
@@ -475,18 +551,18 @@ void DualHarvestExecutor::on_accepted(const std::shared_ptr<GoalHandleHarvest> g
 // validation / monitoring helpers
 // ---------------------------------------------------------------------------
 
-std::optional<std::string> DualHarvestExecutor::validate_target(
-  const double_arm_harvest_interfaces::msg::HarvestTarget & target,
+std::optional<std::string> TaskExecutor::validate_target(
+  const double_arm_harvest_interfaces::msg::TaskTarget & target,
   const std::string & arm_side) const
 {
-  const std::string error = validate_harvest_target(target, base_frame_, min_confidence_);
+  const std::string error = validate_task_target(target, base_frame_, min_confidence_);
   if (error.empty()) {
     return std::nullopt;
   }
   return arm_side + ": " + error;
 }
 
-bool DualHarvestExecutor::joint_states_ready(
+bool TaskExecutor::joint_states_ready(
   const std::vector<std::string> & required_joints, std::string * error) const
 {
   std::lock_guard<std::mutex> lock(joint_state_mutex_);
@@ -514,210 +590,10 @@ bool DualHarvestExecutor::joint_states_ready(
 }
 
 // ---------------------------------------------------------------------------
-// planning
-// ---------------------------------------------------------------------------
-
-geometry_msgs::msg::PoseStamped DualHarvestExecutor::stage_target_pose_base(
-  const double_arm_harvest_interfaces::msg::HarvestTarget & target,
-  const std::array<double, 3> & base_offset) const
-{
-  geometry_msgs::msg::PoseStamped out;
-  out.header = target.target_pose.header;
-  out.pose = target.target_pose.pose;
-  out.pose.position.x += base_offset[0];
-  out.pose.position.y += base_offset[1];
-  out.pose.position.z += base_offset[2];
-  return out;
-}
-
-ArmStagePlan DualHarvestExecutor::plan_arm_pose(
-  moveit::planning_interface::MoveGroupInterface & arm,
-  const geometry_msgs::msg::PoseStamped & target_base_frame)
-{
-  ArmStagePlan out;
-
-  // MoveIt's planning frame is the SRDF root (world). The launch publishes a
-  // fixed identity world->base_link transform; transform properly anyway so
-  // the code stays correct if that ever changes.
-  geometry_msgs::msg::PoseStamped target_planning_frame;
-  try {
-    target_planning_frame =
-      tf_buffer_->transform(target_base_frame, planning_frame_, tf2::durationFromSec(1.0));
-  } catch (const tf2::TransformException & ex) {
-    out.error = std::string("TF transform to planning frame failed: ") + ex.what();
-    return out;
-  }
-
-  // Compute exactly one IK solution, seeded from the current robot state, and
-  // convert the manual pose into a fixed joint target before path planning.
-  // This avoids MoveIt's random pose-goal sampling.
-  arm.setStartStateToCurrentState();
-  if (!arm.setJointValueTarget(target_planning_frame)) {
-    out.error = "single seeded IK failed for the manual approach pose";
-    return out;
-  }
-  arm.setPlanningPipelineId("pilz_industrial_motion_planner");
-  arm.setPlannerId("PTP");
-  arm.setPlanningTime(planning_time_sec_);
-  arm.setNumPlanningAttempts(1);
-  arm.setMaxVelocityScalingFactor(velocity_scale_);
-  arm.setMaxAccelerationScalingFactor(acceleration_scale_);
-
-  moveit::planning_interface::MoveGroupInterface::Plan plan;
-  const moveit::core::MoveItErrorCode error_code = arm.plan(plan);
-  if (error_code != moveit::core::MoveItErrorCode::SUCCESS) {
-    out.error = "MoveIt planning failed with error code " + std::to_string(error_code.val);
-    return out;
-  }
-  out.trajectory = plan.trajectory.joint_trajectory;
-  out.success = true;
-  return out;
-}
-
-ArmStagePlan DualHarvestExecutor::plan_arm_named(
-  moveit::planning_interface::MoveGroupInterface & arm, const std::string & named_target)
-{
-  ArmStagePlan out;
-  arm.setStartStateToCurrentState();
-  if (!arm.setNamedTarget(named_target)) {
-    out.error = "unknown named target '" + named_target + "'";
-    return out;
-  }
-  arm.setPlanningPipelineId("pilz_industrial_motion_planner");
-  arm.setPlannerId("PTP");
-  arm.setPlanningTime(planning_time_sec_);
-  arm.setNumPlanningAttempts(1);
-  arm.setMaxVelocityScalingFactor(velocity_scale_);
-  arm.setMaxAccelerationScalingFactor(acceleration_scale_);
-
-  moveit::planning_interface::MoveGroupInterface::Plan plan;
-  const moveit::core::MoveItErrorCode error_code = arm.plan(plan);
-  if (error_code != moveit::core::MoveItErrorCode::SUCCESS) {
-    out.error = "MoveIt planning to '" + named_target + "' failed with error code " +
-                std::to_string(error_code.val);
-    return out;
-  }
-  out.trajectory = plan.trajectory.joint_trajectory;
-  out.success = true;
-  return out;
-}
-
-ArmStagePlan DualHarvestExecutor::plan_arm_j3_delta(
-  moveit::planning_interface::MoveGroupInterface & arm, double delta)
-{
-  ArmStagePlan out;
-  const auto joint_names = arm.getJointNames();
-  const auto j3 = std::find_if(
-    joint_names.begin(), joint_names.end(), [](const std::string & name) {
-      constexpr const char * suffix = "_Joint_3";
-      return name.size() >= 8 && name.compare(name.size() - 8, 8, suffix) == 0;
-    });
-  if (j3 == joint_names.end()) {
-    out.error = "cannot identify J3 in current MoveIt joint state";
-    return out;
-  }
-
-  // Plan from ONE joint-state snapshot: the start state and the goal must come
-  // from the same sample. Computing the goal base with getCurrentJointValues()
-  // and then calling setStartStateToCurrentState() takes two live /joint_states
-  // samples (ours and move_group's at plan time); on real hardware feedback
-  // noise between them differs in non-J3 joints, so the stroke "moved" those
-  // joints and the strict J3-only check below rejected it. A shared snapshot
-  // keeps every non-J3 goal value bit-identical to its start value.
-  const moveit::core::RobotStatePtr start = arm.getCurrentState();
-  if (!start) {
-    out.error = "cannot fetch the current robot state for the J3 stroke";
-    return out;
-  }
-  std::vector<double> target;
-  start->copyJointGroupPositions(arm.getName(), target);
-  if (target.size() != joint_names.size()) {
-    out.error = "cannot identify J3 in current MoveIt joint state";
-    return out;
-  }
-  const auto index = static_cast<std::size_t>(std::distance(joint_names.begin(), j3));
-  target[index] += delta;
-
-  arm.setStartState(*start);
-  if (!arm.setJointValueTarget(target)) {
-    out.error = "J3 target is outside the configured joint limits";
-    return out;
-  }
-  arm.setPlanningPipelineId("pilz_industrial_motion_planner");
-  arm.setPlannerId("PTP");
-  arm.setPlanningTime(planning_time_sec_);
-  arm.setNumPlanningAttempts(1);
-  arm.setMaxVelocityScalingFactor(velocity_scale_);
-  arm.setMaxAccelerationScalingFactor(acceleration_scale_);
-
-  moveit::planning_interface::MoveGroupInterface::Plan plan;
-  const moveit::core::MoveItErrorCode error_code = arm.plan(plan);
-  if (error_code != moveit::core::MoveItErrorCode::SUCCESS) {
-    out.error = "J3-only planning failed with error code " +
-      std::to_string(error_code.val);
-    return out;
-  }
-  // A joint-space planner may otherwise insert needless detours in redundant
-  // joints. Reject the result when any non-J3 joint leaves a tolerance band
-  // around its first-point value for the complete trajectory. The tolerance
-  // (default 5e-3) absorbs real-hardware feedback noise; a genuine planner
-  // detour still fails the stage.
-  const auto & trajectory = plan.trajectory.joint_trajectory;
-  if (trajectory.points.empty() ||
-    trajectory.points.front().positions.size() != trajectory.joint_names.size())
-  {
-    out.error = "J3 trajectory is empty or malformed";
-    return out;
-  }
-  double worst_deviation = 0.0;
-  std::string worst_joint;
-  for (const auto & point : trajectory.points) {
-    if (point.positions.size() != trajectory.joint_names.size()) {
-      out.error = "J3 trajectory contains an invalid point";
-      return out;
-    }
-    for (std::size_t i = 0; i < trajectory.joint_names.size(); ++i) {
-      const auto current_name = std::find(
-        joint_names.begin(), joint_names.end(), trajectory.joint_names[i]);
-      if (current_name == joint_names.end()) {
-        out.error = "J3 trajectory contains an unexpected joint";
-        return out;
-      }
-      const auto current_index = static_cast<std::size_t>(
-        std::distance(joint_names.begin(), current_name));
-      if (current_index == index) {
-        continue;
-      }
-      const double deviation =
-        std::abs(point.positions[i] - trajectory.points.front().positions[i]);
-      if (deviation > worst_deviation) {
-        worst_deviation = deviation;
-        worst_joint = trajectory.joint_names[i];
-      }
-    }
-  }
-  if (worst_deviation > j3_stroke_tolerance_) {
-    out.error = "joint '" + worst_joint + "' moved " +
-                std::to_string(worst_deviation) + " during the J3-only stroke (tolerance " +
-                std::to_string(j3_stroke_tolerance_) + ")";
-    return out;
-  }
-  if (worst_deviation > 1e-5) {
-    RCLCPP_WARN(
-      get_logger(),
-      "J3 stroke: non-J3 joint '%s' deviates %.2e (within tolerance %.2e)",
-      worst_joint.c_str(), worst_deviation, j3_stroke_tolerance_);
-  }
-  out.trajectory = trajectory;
-  out.success = true;
-  return out;
-}
-
-// ---------------------------------------------------------------------------
 // stage dispatch barrier
 // ---------------------------------------------------------------------------
 
-void DualHarvestExecutor::cancel_outstanding_arms()
+void TaskExecutor::cancel_outstanding_arms()
 {
   const bool cancel_left = barrier_.needs_cancel(StageBarrier::LEFT);
   const bool cancel_right = barrier_.needs_cancel(StageBarrier::RIGHT);
@@ -744,11 +620,17 @@ void DualHarvestExecutor::cancel_outstanding_arms()
     }
     stage_cv_.wait_for(lock, std::chrono::milliseconds(50));
   }
-  RCLCPP_WARN(
-    get_logger(), "peer cancellation not confirmed within %.1fs", cancel_timeout_sec_);
+  const bool unresolved =
+    barrier_.needs_cancel(StageBarrier::LEFT) || barrier_.needs_cancel(StageBarrier::RIGHT);
+  recovery_required_.store(unresolved);
+  if (unresolved) {
+    RCLCPP_WARN(
+      get_logger(), "peer cancellation not confirmed within %.1fs; new task goals remain blocked",
+      cancel_timeout_sec_);
+  }
 }
 
-bool DualHarvestExecutor::run_stage_dispatch(
+bool TaskExecutor::run_stage_dispatch(
   const std::string & task_id, const std::string & stage_str, bool left_enabled,
   bool right_enabled, ArmStagePlan & left_plan, ArmStagePlan & right_plan,
   std::string & error, double left_stagger_sec, double right_stagger_sec)
@@ -779,15 +661,34 @@ bool DualHarvestExecutor::run_stage_dispatch(
   // The staggered arm starts later than the shared stamp, so its deadline has
   // to cover the extra wait on top of the normal stage budget.
   const double stagger = std::max(left_stagger_sec, right_stagger_sec);
-  const auto deadline = std::chrono::steady_clock::now() +
-    std::chrono::duration<double>(stage_timeout_sec_ + stagger);
+  const auto dispatch_started = std::chrono::steady_clock::now();
+  const auto accept_deadline = dispatch_started +
+    std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+      std::chrono::duration<double>(goal_accept_timeout_sec_));
+  const auto stage_deadline = dispatch_started +
+    std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+      std::chrono::duration<double>(stage_timeout_sec_ + stagger));
+  bool acceptance_timed_out = false;
   {
     std::unique_lock<std::mutex> lock(stage_mutex_);
-    stage_cv_.wait_until(
-      lock, deadline, [this] {return barrier_.verdict() != StageBarrier::Verdict::WAIT;});
+    stage_cv_.wait_until(lock, accept_deadline, [this] {
+      return barrier_.verdict() != StageBarrier::Verdict::WAIT ||
+             barrier_.all_goal_responses_received();
+    });
   }
 
   StageBarrier::Verdict verdict = barrier_.verdict();
+  if (verdict == StageBarrier::Verdict::WAIT && !barrier_.all_goal_responses_received()) {
+    acceptance_timed_out = true;
+    barrier_.mark_stage_timeout();
+    verdict = StageBarrier::Verdict::TIMEOUT;
+  }
+  if (verdict == StageBarrier::Verdict::WAIT) {
+    std::unique_lock<std::mutex> lock(stage_mutex_);
+    stage_cv_.wait_until(
+      lock, stage_deadline, [this] {return barrier_.verdict() != StageBarrier::Verdict::WAIT;});
+    verdict = barrier_.verdict();
+  }
   if (verdict == StageBarrier::Verdict::WAIT) {
     barrier_.mark_stage_timeout();
     verdict = StageBarrier::Verdict::TIMEOUT;
@@ -802,8 +703,13 @@ bool DualHarvestExecutor::run_stage_dispatch(
       return false;
     case StageBarrier::Verdict::TIMEOUT:
       cancel_outstanding_arms();
-      error = "stage timed out after " + std::to_string(stage_timeout_sec_) +
-              "s; outstanding goals canceled";
+      if (acceptance_timed_out) {
+        error = "trajectory goal acceptance timed out after " +
+          std::to_string(goal_accept_timeout_sec_) + "s; outstanding goals canceled";
+      } else {
+        error = "stage timed out after " + std::to_string(stage_timeout_sec_) +
+          "s; outstanding goals canceled";
+      }
       return false;
     case StageBarrier::Verdict::ABORT: {
       cancel_outstanding_arms();
@@ -828,54 +734,52 @@ bool DualHarvestExecutor::run_stage_dispatch(
 // feedback
 // ---------------------------------------------------------------------------
 
-void DualHarvestExecutor::publish_stage_feedback(
-  const std::shared_ptr<GoalHandleHarvest> & goal_handle,
+void TaskExecutor::publish_stage_feedback(
+  const GoalCallbacks & callbacks,
+  const std::string & task_id,
   const std::string & left_stage,
   const std::string & right_stage,
   float left_progress,
   float right_progress,
   const std::string & message)
 {
-  {
-    std::lock_guard<std::mutex> lock(feedback_state_mutex_);
-    feedback_left_stage_ = left_stage;
-    feedback_right_stage_ = right_stage;
-    feedback_left_progress_ = left_progress;
-    feedback_right_progress_ = right_progress;
-    feedback_message_ = message;
-  }
-  if (!goal_handle || !goal_handle->is_active()) {
-    return;
-  }
-  ExecuteDualHarvest::Feedback feedback;
+  ExecuteTask::Feedback feedback;
+  feedback.task_id = task_id;
+  feedback.state = "RUNNING";
+  feedback.current_stage = !left_stage.empty() ? left_stage : right_stage;
   feedback.left_stage = left_stage;
   feedback.right_stage = right_stage;
   feedback.left_progress = left_progress;
   feedback.right_progress = right_progress;
+  feedback.progress = left_stage.empty() ? right_progress :
+    (right_stage.empty() ? left_progress : (left_progress + right_progress) / 2.0F);
   feedback.message = message;
+  {
+    std::lock_guard<std::mutex> lock(feedback_state_mutex_);
+    latest_feedback_ = feedback;
+  }
+  if (!callbacks.is_active || !callbacks.is_active() || !callbacks.publish_feedback) {
+    return;
+  }
   try {
-    goal_handle->publish_feedback(std::make_shared<ExecuteDualHarvest::Feedback>(feedback));
+    callbacks.publish_feedback(feedback);
   } catch (const std::exception & ex) {
     RCLCPP_WARN(get_logger(), "publish_feedback failed: %s", ex.what());
   }
 }
 
-void DualHarvestExecutor::feedback_timer_tick()
+void TaskExecutor::feedback_timer_tick()
 {
-  std::shared_ptr<GoalHandleHarvest> goal_handle;
-  ExecuteDualHarvest::Feedback feedback;
+  std::function<void(const ExecuteTask::Feedback &)> publisher;
+  ExecuteTask::Feedback feedback;
   {
     std::lock_guard<std::mutex> lock(feedback_state_mutex_);
-    goal_handle = active_goal_;
-    feedback.left_stage = feedback_left_stage_;
-    feedback.right_stage = feedback_right_stage_;
-    feedback.left_progress = feedback_left_progress_;
-    feedback.right_progress = feedback_right_progress_;
-    feedback.message = feedback_message_;
+    publisher = active_feedback_publisher_;
+    feedback = latest_feedback_;
   }
-  if (goal_handle && goal_handle->is_active()) {
+  if (publisher) {
     try {
-      goal_handle->publish_feedback(std::make_shared<ExecuteDualHarvest::Feedback>(feedback));
+      publisher(feedback);
     } catch (const std::exception & ex) {
       RCLCPP_WARN(get_logger(), "periodic publish_feedback failed: %s", ex.what());
     }
@@ -886,112 +790,192 @@ void DualHarvestExecutor::feedback_timer_tick()
 // task execution
 // ---------------------------------------------------------------------------
 
-void DualHarvestExecutor::execute(const std::shared_ptr<GoalHandleHarvest> goal_handle)
+void TaskExecutor::execute(const std::shared_ptr<GoalHandleHarvest> goal_handle)
 {
   const auto goal = goal_handle->get_goal();
-  const bool left_enabled = goal->execute_left;
-  const bool right_enabled = goal->execute_right;
-  const std::string task_id =
-    goal->left_target.target_id + "|" + goal->right_target.target_id;
-  auto result = std::make_shared<ExecuteDualHarvest::Result>();
+  TaskRequest request = convert_legacy_goal(*goal);
+  GoalCallbacks callbacks;
+  callbacks.is_active = [goal_handle] {return goal_handle->is_active();};
+  callbacks.publish_feedback = [goal_handle](const ExecuteTask::Feedback & source) {
+      if (!goal_handle->is_active()) {
+        return;
+      }
+      auto feedback = std::make_shared<ExecuteDualHarvest::Feedback>();
+      feedback->left_stage = source.left_stage;
+      feedback->right_stage = source.right_stage;
+      feedback->left_progress = source.left_progress;
+      feedback->right_progress = source.right_progress;
+      feedback->message = source.message;
+      goal_handle->publish_feedback(feedback);
+    };
+  callbacks.finish = [this, goal_handle](
+      const ExecuteTask::Result & source, GoalTermination termination) {
+      auto result = std::make_shared<ExecuteDualHarvest::Result>();
+      result->success = source.success;
+      result->left_success = source.left_success;
+      result->right_success = source.right_success;
+      result->failed_stage = source.failed_stage;
+      result->message = source.message;
+      if (termination == GoalTermination::SUCCEEDED) {
+        goal_handle->succeed(result);
+      } else if (termination == GoalTermination::ABORTED) {
+        goal_handle->abort(result);
+      } else {
+        bool transitioned = false;
+        for (int attempt = 0; attempt < 20 && !transitioned; ++attempt) {
+          try {
+            goal_handle->canceled(result);
+            transitioned = true;
+          } catch (const std::exception & ex) {
+            if (attempt == 0) {
+              RCLCPP_WARN(get_logger(), "legacy canceled() transition is pending: %s", ex.what());
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+          }
+        }
+        if (!transitioned) {
+          goal_handle->abort(result);
+        }
+      }
+    };
+  execute_request(request, callbacks);
+}
 
-  // Release the task gate and the reserved target ids on every exit path.
+void TaskExecutor::execute(const std::shared_ptr<GoalHandleTask> goal_handle)
+{
+  const auto goal = goal_handle->get_goal();
+  TaskRequest request = convert_task_goal(*goal);
+  GoalCallbacks callbacks;
+  callbacks.is_active = [goal_handle] {return goal_handle->is_active();};
+  callbacks.publish_feedback = [goal_handle](const ExecuteTask::Feedback & feedback) {
+      if (goal_handle->is_active()) {
+        goal_handle->publish_feedback(std::make_shared<ExecuteTask::Feedback>(feedback));
+      }
+    };
+  callbacks.finish = [goal_handle](
+      const ExecuteTask::Result & source, GoalTermination termination) {
+      auto result = std::make_shared<ExecuteTask::Result>(source);
+      switch (termination) {
+        case GoalTermination::SUCCEEDED:
+          goal_handle->succeed(result);
+          break;
+        case GoalTermination::ABORTED:
+          goal_handle->abort(result);
+          break;
+        case GoalTermination::CANCELED: {
+          bool transitioned = false;
+          for (int attempt = 0; attempt < 20 && !transitioned; ++attempt) {
+            try {
+              goal_handle->canceled(result);
+              transitioned = true;
+            } catch (const std::exception &) {
+              std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+          }
+          if (!transitioned) {
+            goal_handle->abort(result);
+          }
+          break;
+        }
+      }
+    };
+  execute_request(request, callbacks);
+}
+
+void TaskExecutor::execute_request(const TaskRequest & request, const GoalCallbacks & callbacks)
+{
+  const bool left_enabled = request.execute_left;
+  const bool right_enabled = request.execute_right;
+  const std::string & task_id = request.task_id;
+  const RetreatDelays retreat_delays = request.task_type == TaskType::TOMATO_PICK ?
+    TomatoPickTask().retreat_delays(left_enabled, right_enabled, request.roles) :
+    LeafRemoveTask(leaf_left_retreat_delay_sec_, leaf_right_retreat_delay_sec_)
+    .retreat_delays(left_enabled, right_enabled, request.roles);
+  {
+    std::lock_guard<std::mutex> lock(feedback_state_mutex_);
+    active_feedback_publisher_ = callbacks.publish_feedback;
+    latest_feedback_ = ExecuteTask::Feedback();
+    latest_feedback_.task_id = task_id;
+    latest_feedback_.state = "RUNNING";
+  }
+
   struct ExitGuard
   {
     std::mutex & gate;
     bool & busy;
     TargetLedger & ledger;
+    bool release_left;
+    bool release_right;
     const std::string & left_id;
     const std::string & right_id;
     std::mutex & feedback_mutex;
-    std::shared_ptr<GoalHandleHarvest> & active_goal;
+    std::function<void(const ExecuteTask::Feedback &)> & active_publisher;
     ~ExitGuard()
     {
-      ledger.release(left_id);
-      ledger.release(right_id);
+      if (release_left) {
+        ledger.release(left_id);
+      }
+      if (release_right) {
+        ledger.release(right_id);
+      }
       {
-        std::lock_guard<std::mutex> fb_lock(feedback_mutex);
-        active_goal.reset();
+        std::lock_guard<std::mutex> feedback_lock(feedback_mutex);
+        active_publisher = {};
       }
       std::lock_guard<std::mutex> lock(gate);
       busy = false;
     }
-  } guard{goal_gate_mutex_, busy_, target_ledger_,
-    goal->left_target.target_id, goal->right_target.target_id,
-    feedback_state_mutex_, active_goal_};
-  {
-    std::lock_guard<std::mutex> lock(feedback_state_mutex_);
-    active_goal_ = goal_handle;
-  }
+  } guard{goal_gate_mutex_, busy_, target_ledger_, left_enabled, right_enabled,
+    request.left_target.target_id, request.right_target.target_id,
+    feedback_state_mutex_, active_feedback_publisher_};
 
   auto fail = [&](const std::string & stage, const std::string & message) {
-      result->success = false;
-      result->left_success = false;
-      result->right_success = false;
-      result->failed_stage = stage;
-      result->message = message;
+      ExecuteTask::Result result;
+      result.task_id = task_id;
+      result.success = false;
+      result.left_success = false;
+      result.right_success = false;
+      result.failed_stage = stage;
+      const bool recovery_required = recovery_required_.load() ||
+        gripper_recovery_required_->load();
+      result.error_code = recovery_required ? "RECOVERY_REQUIRED" : "EXECUTION_FAILED";
+      result.message = recovery_required ?
+        message + "; downstream cancellation is not confirmed; new tasks are blocked" : message;
       try {
-        goal_handle->abort(result);
+        callbacks.finish(result, GoalTermination::ABORTED);
       } catch (const std::exception & ex) {
-        RCLCPP_ERROR(
-          get_logger(), "[task=%s] abort() transition failed: %s", task_id.c_str(),
-          ex.what());
+        RCLCPP_ERROR(get_logger(), "[task=%s] abort transition failed: %s", task_id.c_str(), ex.what());
       }
-      RCLCPP_ERROR(
-        get_logger(), "[task=%s][%s] FAILED: %s", task_id.c_str(), stage.c_str(),
-        message.c_str());
+      RCLCPP_ERROR(get_logger(), "[task=%s][%s] FAILED: %s",
+        task_id.c_str(), stage.c_str(), result.message.c_str());
     };
   auto finish_canceled = [&](const std::string & stage) {
-      result->success = false;
-      result->left_success = false;
-      result->right_success = false;
-      result->failed_stage = stage;
-      result->message = "canceled by client at stage " + stage;
-      // The server thread applies its own CANCELING transition right after
-      // this task's on_cancel callback returns, which can race with this
-      // coordinator waking up. Retry briefly so the contract stays CANCELED,
-      // then fall back to abort() instead of ever killing the process.
-      bool transitioned = false;
-      for (int attempt = 0; attempt < 20 && !transitioned; ++attempt) {
-        try {
-          goal_handle->canceled(result);
-          transitioned = true;
-        } catch (const std::exception & ex) {
-          if (attempt == 0) {
-            RCLCPP_WARN(
-              get_logger(), "[task=%s] canceled() raced the server transition (%s); retrying",
-              task_id.c_str(), ex.what());
-          }
-          std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        }
+      ExecuteTask::Result result;
+      result.task_id = task_id;
+      result.success = false;
+      result.failed_stage = stage;
+      const bool recovery_required = recovery_required_.load() ||
+        gripper_recovery_required_->load();
+      result.error_code = recovery_required ? "RECOVERY_REQUIRED" : "CANCELED";
+      result.message = "canceled by client at stage " + stage;
+      if (recovery_required) {
+        result.message += "; downstream cancellation is not confirmed; new tasks are blocked";
       }
-      if (!transitioned) {
-        RCLCPP_WARN(
-          get_logger(), "[task=%s] canceled() never became valid; aborting instead",
-          task_id.c_str());
-        try {
-          goal_handle->abort(result);
-        } catch (const std::exception & inner) {
-          RCLCPP_ERROR(get_logger(), "[task=%s] abort() fallback failed: %s",
-            task_id.c_str(), inner.what());
-        }
+      try {
+        callbacks.finish(result, GoalTermination::CANCELED);
+      } catch (const std::exception & ex) {
+        RCLCPP_ERROR(get_logger(), "[task=%s] canceled transition failed: %s", task_id.c_str(), ex.what());
       }
-      RCLCPP_WARN(
-        get_logger(), "[task=%s][%s] CANCELED", task_id.c_str(), stage.c_str());
+      RCLCPP_WARN(get_logger(), "[task=%s][%s] CANCELED", task_id.c_str(), stage.c_str());
     };
   auto succeed = [&](const std::string & message) {
-      result->success = true;
-      result->left_success = left_enabled;
-      result->right_success = right_enabled;
-      result->failed_stage = "";
-      result->message = message;
-      try {
-        goal_handle->succeed(result);
-      } catch (const std::exception & ex) {
-        RCLCPP_ERROR(
-          get_logger(), "[task=%s] succeed() transition failed: %s", task_id.c_str(),
-          ex.what());
-      }
+      ExecuteTask::Result result;
+      result.task_id = task_id;
+      result.success = true;
+      result.left_success = left_enabled;
+      result.right_success = right_enabled;
+      result.message = message;
+      callbacks.finish(result, GoalTermination::SUCCEEDED);
       RCLCPP_INFO(get_logger(), "[task=%s] SUCCEEDED: %s", task_id.c_str(), message.c_str());
     };
 
@@ -1004,17 +988,18 @@ void DualHarvestExecutor::execute(const std::shared_ptr<GoalHandleHarvest> goal_
   // -----------------------------------------------------------------------
   const std::string validate_stage = stage_name(Stage::VALIDATE);
   publish_stage_feedback(
-    goal_handle, left_enabled ? validate_stage : "", right_enabled ? validate_stage : "",
+    callbacks,
+    task_id, left_enabled ? validate_stage : "", right_enabled ? validate_stage : "",
     disabled_progress, disabled_progress, "validating targets");
 
   if (left_enabled) {
-    if (const auto error = validate_target(goal->left_target, "left")) {
+    if (const auto error = validate_target(request.left_target, "left")) {
       fail(validate_stage, *error);
       return;
     }
   }
   if (right_enabled) {
-    if (const auto error = validate_target(goal->right_target, "right")) {
+    if (const auto error = validate_target(request.right_target, "right")) {
       fail(validate_stage, *error);
       return;
     }
@@ -1036,8 +1021,8 @@ void DualHarvestExecutor::execute(const std::shared_ptr<GoalHandleHarvest> goal_
   }
   RCLCPP_INFO(
     get_logger(), "[task=%s] targets valid: left=%s(%s) right=%s(%s)",
-    task_id.c_str(), goal->left_target.target_id.c_str(),
-    left_enabled ? "enabled" : "disabled", goal->right_target.target_id.c_str(),
+    task_id.c_str(), request.left_target.target_id.c_str(),
+    left_enabled ? "enabled" : "disabled", request.right_target.target_id.c_str(),
     right_enabled ? "enabled" : "disabled");
 
   // -----------------------------------------------------------------------
@@ -1053,7 +1038,7 @@ void DualHarvestExecutor::execute(const std::shared_ptr<GoalHandleHarvest> goal_
       finish_canceled(stage_name(stage));
       return;
     }
-    if (!goal_handle->is_active()) {
+    if (!callbacks.is_active()) {
       return;
     }
 
@@ -1064,7 +1049,8 @@ void DualHarvestExecutor::execute(const std::shared_ptr<GoalHandleHarvest> goal_
       const std::string stage_str = stage_name(stage);
       const bool opening = stage != Stage::END_EFFECTOR;
       publish_stage_feedback(
-        goal_handle, left_enabled ? stage_str : "", right_enabled ? stage_str : "",
+        callbacks,
+    task_id, left_enabled ? stage_str : "", right_enabled ? stage_str : "",
         left_progress, right_progress,
         stage == Stage::PREPARE_GRIPPER ? "opening enabled grippers" :
         stage == Stage::RELEASE_GRIPPER ? "releasing enabled grippers after HOME" :
@@ -1088,7 +1074,8 @@ void DualHarvestExecutor::execute(const std::shared_ptr<GoalHandleHarvest> goal_
     const std::string stage_str = stage_name(stage);
     const auto stage_start = std::chrono::steady_clock::now();
     publish_stage_feedback(
-      goal_handle, left_enabled ? stage_str : "", right_enabled ? stage_str : "",
+      callbacks,
+    task_id, left_enabled ? stage_str : "", right_enabled ? stage_str : "",
       left_progress, right_progress, "planning " + stage_str);
 
     // Plan the next stage only from fresh feedback (plan doc 13.1).
@@ -1102,31 +1089,31 @@ void DualHarvestExecutor::execute(const std::shared_ptr<GoalHandleHarvest> goal_
     // direct J3 retraction, then the named HOME joint target.
     auto plan_stage_for = [&](
       Stage st, moveit::planning_interface::MoveGroupInterface & arm,
-      const double_arm_harvest_interfaces::msg::HarvestTarget & target,
+      const double_arm_harvest_interfaces::msg::TaskTarget & target,
       const std::array<double, 3> & j3_axis,
       const double j3_extend_sign,
       const std::string & home_name) -> ArmStagePlan {
       if (st == Stage::HOME) {
-        return plan_arm_named(arm, home_name);
+        return motion_skill_->plan_named(arm, home_name);
       }
       if (st == Stage::PICK) {
-        return plan_arm_j3_delta(arm, j3_extend_sign * j3_extend_distance_);
+        return motion_skill_->plan_j3_delta(arm, j3_extend_sign * j3_extend_distance_);
       }
       if (st == Stage::RETREAT) {
-        return plan_arm_j3_delta(arm, -j3_extend_sign * j3_extend_distance_);
+        return motion_skill_->plan_j3_delta(arm, -j3_extend_sign * j3_extend_distance_);
       }
       const std::array<double, 3> back = {
         -j3_extend_distance_ * j3_axis[0],
         -j3_extend_distance_ * j3_axis[1],
         -j3_extend_distance_ * j3_axis[2]};
-      return plan_arm_pose(arm, stage_target_pose_base(target, back));
+      return motion_skill_->plan_pose(arm, motion_skill_->stage_target_pose_base(target, back));
     };
 
     ArmStagePlan left_plan;
     ArmStagePlan right_plan;
     if (left_enabled) {
       left_plan = plan_stage_for(
-        stage, *left_arm_, goal->left_target, left_j3_extend_axis_,
+        stage, *left_arm_, request.left_target, left_j3_extend_axis_,
         1.0,
         left_home_name_);
       if (!left_plan.success) {
@@ -1137,7 +1124,7 @@ void DualHarvestExecutor::execute(const std::shared_ptr<GoalHandleHarvest> goal_
     }
     if (right_enabled) {
       right_plan = plan_stage_for(
-        stage, *right_arm_, goal->right_target, right_j3_extend_axis_,
+        stage, *right_arm_, request.right_target, right_j3_extend_axis_,
         -1.0,
         right_home_name_);
       if (!right_plan.success) {
@@ -1173,17 +1160,13 @@ void DualHarvestExecutor::execute(const std::shared_ptr<GoalHandleHarvest> goal_
       task_id.c_str(), stage_str.c_str(), left_plan.trajectory.points.size(),
       right_plan.trajectory.points.size());
 
-    // Leaf mode staggers only the RETREAT stage: the right arm retracts its
-    // J3 first and the left arm keeps holding the fruit for a few extra
-    // seconds. Every other stage stays synchronised, and single-arm runs are
-    // never staggered.
     double left_stagger = 0.0;
     double right_stagger = 0.0;
-    if (task_mode_ == "leaf" && stage == Stage::RETREAT &&
-      left_enabled && right_enabled)
-    {
-      left_stagger = leaf_left_retreat_delay_sec_;
-      right_stagger = leaf_right_retreat_delay_sec_;
+    if (stage == Stage::RETREAT) {
+      left_stagger = retreat_delays.left;
+      right_stagger = retreat_delays.right;
+    }
+    if (left_stagger > 0.0 || right_stagger > 0.0) {
       RCLCPP_INFO(
         get_logger(), "[task=%s][%s] leaf mode: stagger L=%.2fs R=%.2fs",
         task_id.c_str(), stage_str.c_str(), left_stagger, right_stagger);
@@ -1209,7 +1192,8 @@ void DualHarvestExecutor::execute(const std::shared_ptr<GoalHandleHarvest> goal_
     right_progress =
       right_enabled ? static_cast<float>(completed_motion) / kMotionStageCount : 0.0f;
     publish_stage_feedback(
-      goal_handle, left_enabled ? stage_str : "", right_enabled ? stage_str : "",
+      callbacks,
+    task_id, left_enabled ? stage_str : "", right_enabled ? stage_str : "",
       left_progress, right_progress, stage_str + " completed");
     const double stage_seconds =
       std::chrono::duration<double>(std::chrono::steady_clock::now() - stage_start).count();
@@ -1221,9 +1205,10 @@ void DualHarvestExecutor::execute(const std::shared_ptr<GoalHandleHarvest> goal_
   }
 
   publish_stage_feedback(
-    goal_handle, left_enabled ? "DONE" : "", right_enabled ? "DONE" : "",
+    callbacks,
+    task_id, left_enabled ? "DONE" : "", right_enabled ? "DONE" : "",
     left_enabled ? 1.0f : 0.0f, right_enabled ? 1.0f : 0.0f, "all stages completed");
-  succeed("harvest stages completed");
+  succeed(task_type_name(request.task_type) + " stages completed");
 }
 
 }  // namespace double_arm_harvest_execution

@@ -16,7 +16,7 @@ int main(int argc, char ** argv)
   rclcpp::NodeOptions options;
   options.automatically_declare_parameters_from_overrides(true);
 
-  auto node = std::make_shared<double_arm_harvest_execution::DualHarvestExecutor>(options);
+  auto node = std::make_shared<double_arm_harvest_execution::TaskExecutor>(options);
 
   rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 6);
   executor.add_node(node);

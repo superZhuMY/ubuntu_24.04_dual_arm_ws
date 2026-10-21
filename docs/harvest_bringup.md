@@ -47,7 +47,7 @@ ${EDITOR:-nano} src/double_arm_harvest_execution/config/manual_targets.yaml
 ```bash
 source /opt/ros/jazzy/setup.bash
 source install/setup.bash
-ros2 launch double_arm_harvest_execution harvest_fake.launch.py start_rviz:=true
+ros2 launch double_arm_bringup robot.launch.py mode:=fake start_rviz:=true
 ```
 
 等待 `move groups ready` 后，在另一个终端发送手工点位：
@@ -62,33 +62,52 @@ ros2 run double_arm_harvest_execution send_manual_harvest_goal.py \
 fake 启动始终包含 mock 夹爪和完整动作链，不再提供 `dry_run`、`plan_only`、
 `mock_grippers` 或自动发送目标等模式。
 
-## 3.1 任务模式（采摘 / 打叶）
+## 3.1 运行时任务选择（采摘 / 打叶）
 
-`task_mode` 决定动作时序，默认 `tomato_pick`（双臂采摘），新增 `leaf`（打叶采摘）：
+任务类型由每次 `/execute_task` Action Goal 的 `task_type` 决定；不需要重启节点或
+更改 Launch。发送脚本默认 `tomato_pick`，打叶使用 `leaf_remove`：
 
 | 模式 | 行为 |
 |---|---|
-| `tomato_pick` | 双臂完全同步，现有流程，行为不变 |
-| `leaf` | **仅 RETREAT 错开**：右臂先缩 J3，等待 `leaf_left_retreat_delay_sec`（默认 3.0 s）后左臂再缩；其余阶段（开爪/接近/伸出/闭合/回 HOME/松爪）与采摘一致 |
+| `tomato_pick` | 双臂阶段同步，保留现有采摘流程 |
+| `leaf_remove` | 保留原打叶流程；仅双臂 RETREAT 错开，右臂先缩 J3，等待 `leaf_left_retreat_delay_sec`（默认 3.0 s）后左臂再缩 |
 
-`leaf` 让左臂夹爪在伸出位多夹住果实数秒，便于叶片剥离。参数在
-`src/double_arm_harvest_execution/config/harvest_motion.yaml`：
+目标和执行臂也随 Action Goal 提交。当前双臂打叶默认角色是左臂 `hold`、右臂
+`operate`；`hold` 角色表示保持臂在 RETREAT 阶段等待操作臂回撤后再回撤，其他角色组合会被拒绝。当前动作顺序、两侧夹爪阶段及双臂规划保持既有流程。参数 `legacy_task_type` 只用于兼容旧
+`/execute_dual_harvest` 接口：
 
 ```yaml
-task_mode: tomato_pick          # tomato_pick | leaf
+legacy_task_type: tomato_pick   # tomato_pick | leaf | leaf_remove
 leaf_left_retreat_delay_sec: 3.0
 leaf_right_retreat_delay_sec: 0.0
 ```
 
-launch 可覆盖（无需改 yaml）：
+无需重启就能在同一个执行器进程中切换任务类型：
 
 ```bash
-ros2 launch double_arm_harvest_execution harvest_fake.launch.py task_mode:=leaf
-ros2 launch double_arm_harvest_execution harvest_stm32.launch.py task_mode:=leaf
+ros2 run double_arm_harvest_execution send_manual_harvest_goal.py --task-type tomato_pick
+ros2 run double_arm_harvest_execution send_manual_harvest_goal.py --task-type leaf_remove
 ```
 
-单臂运行时不错开（leaf 是双臂概念）。`leaf` 依赖流式执行器遵守轨迹
+单臂运行时不错开。打叶延迟策略由 Action Goal 的角色组合触发，依赖流式执行器遵守轨迹
 `header.stamp`（本工程默认 `execution_mode:=streaming`，已满足）。
+
+人工目标 YAML 描述的是最终 TCP 位姿，不是视觉检测位置。使用 `--no-left` 或 `--no-right` 时只需提供启用侧的 YAML 目标。可附加 `target_type`、
+`source` 和置信度；发送脚本将其转换成与未来目标处理层相同的 `TaskTarget`。
+请用实测坐标替换示例目标后再连接真机。
+
+## 3.2 统一 Launch 模式
+
+```bash
+ros2 launch double_arm_bringup robot.launch.py mode:=fake
+ros2 launch double_arm_bringup robot.launch.py mode:=readonly stm32_device:=/dev/ttyUSB0
+ros2 launch double_arm_bringup robot.launch.py mode:=real stm32_device:=/dev/ttyUSB0
+```
+
+`fake` 启动 mock 硬件、MoveIt、任务执行器和模拟夹爪。`readonly` 只启动 STM32
+状态读取链，不提供任务 Action 或运动控制器。`real` 的电机和夹爪使能默认关闭；
+经过现场检查并明确需要运动时，需分别传入 `allow_motor_enable:=true` 和
+`gripper_allow_motion:=true`。只打开其中一个仍会拒绝任务。
 
 ## 4. STM32 实机启动
 
@@ -97,13 +116,15 @@ ros2 launch double_arm_harvest_execution harvest_stm32.launch.py task_mode:=leaf
 ```bash
 source /opt/ros/jazzy/setup.bash
 source install/setup.bash
-ros2 launch double_arm_harvest_execution harvest_stm32.launch.py \
+ros2 launch double_arm_bringup robot.launch.py mode:=real \
   stm32_device:=/dev/ttyUSB0 \
-  gripper_device:=/dev/tcp_gripper
+  gripper_device:=/dev/tcp_gripper \
+  allow_motor_enable:=true gripper_allow_motion:=true
 ```
 
-实机 launch 始终启动机械臂、MoveIt、RS485 夹爪和采摘执行器，但不会自动运动。
-只有运行 `send_manual_harvest_goal.py` 后才开始执行。
+real launch 始终启动机械臂、MoveIt、RS485 夹爪和任务执行器，但默认两种动作使能
+均关闭，任务会被拒绝。打开两个使能后才允许运行 `send_manual_harvest_goal.py`。
+保留的 `harvest_stm32.launch.py` 作为内部兼容 / 调试入口。
 
 ### 循环执行
 
