@@ -2,6 +2,7 @@
 
 #include "double_arm_harvest_execution/trajectory_dispatcher.hpp"
 
+#include <exception>
 #include <utility>
 
 namespace double_arm_harvest_execution
@@ -11,9 +12,15 @@ TrajectoryDispatcher::TrajectoryDispatcher(
   rclcpp::Node::SharedPtr node, const std::string & left_action,
   const std::string & right_action, const std::string & /*left_joints_log*/,
   const std::string & /*right_joints_log*/, Hooks hooks,
-  rclcpp::CallbackGroup::SharedPtr group)
-: node_(std::move(node)), hooks_(std::move(hooks))
+  rclcpp::CallbackGroup::SharedPtr group, SendGoal send_goal)
+: node_(std::move(node)), hooks_(std::move(hooks)), send_goal_(std::move(send_goal))
 {
+  if (!send_goal_) {
+    send_goal_ = [](bool, const ActionClient::SharedPtr & client,
+        const FollowJointTrajectory::Goal & goal, const ActionClient::SendGoalOptions & options) {
+        (void)client->async_send_goal(goal, options);
+      };
+  }
   clients_[0] = rclcpp_action::create_client<FollowJointTrajectory>(
     node_->get_node_base_interface(), node_->get_node_graph_interface(),
     node_->get_node_logging_interface(), node_->get_node_waitables_interface(),
@@ -66,43 +73,69 @@ uint64_t TrajectoryDispatcher::dispatch(
     if (!send) {
       continue;  // never send a goal for a disabled arm
     }
-    FollowJointTrajectory::Goal goal;
-    goal.trajectory = (side == 0) ? left : right;
+    try {
+      FollowJointTrajectory::Goal goal;
+      goal.trajectory = (side == 0) ? left : right;
 
-    rclcpp_action::Client<FollowJointTrajectory>::SendGoalOptions options;
-    options.goal_response_callback =
-      [this, side, state](const GoalHandleFJT::SharedPtr & goal_handle) {
-        const bool accepted = static_cast<bool>(goal_handle);
-        bool cancel_requested = false;
-        if (accepted) {
-          std::lock_guard<std::mutex> lock(goals_mutex_);
-          state->goals[side] = goal_handle;
-          cancel_requested = state->cancel_requested[side];
-        }
-        if (accepted && cancel_requested) {
-          cancel_goal(side == 0, goal_handle);
-        }
-        if (hooks_.on_goal_response) {
-          hooks_.on_goal_response(state->id, side == 0, accepted);
-        }
-      };
-    options.result_callback =
-      [this, side, state](const GoalHandleFJT::WrappedResult & wrapped) {
-        {
-          std::lock_guard<std::mutex> lock(goals_mutex_);
-          state->goals[side].reset();
-        }
-        const bool success = wrapped.code == rclcpp_action::ResultCode::SUCCEEDED;
-        std::string error;
-        if (!success) {
-          error = wrapped.result ? wrapped.result->error_string : "";
-        }
-        if (hooks_.on_result) {
-          hooks_.on_result(state->id, side == 0, success, error);
-        }
-      };
+      rclcpp_action::Client<FollowJointTrajectory>::SendGoalOptions options;
+      options.goal_response_callback =
+        [this, side, state](const GoalHandleFJT::SharedPtr & goal_handle) {
+          const bool accepted = static_cast<bool>(goal_handle);
+          bool cancel_requested = false;
+          if (accepted) {
+            std::lock_guard<std::mutex> lock(goals_mutex_);
+            state->goals[side] = goal_handle;
+            cancel_requested = state->cancel_requested[side];
+          }
+          if (accepted && cancel_requested) {
+            cancel_goal(side == 0, goal_handle);
+          }
+          if (hooks_.on_goal_response) {
+            hooks_.on_goal_response(state->id, side == 0, accepted);
+          }
+        };
+      options.result_callback =
+        [this, side, state](const GoalHandleFJT::WrappedResult & wrapped) {
+          {
+            std::lock_guard<std::mutex> lock(goals_mutex_);
+            state->goals[side].reset();
+          }
+          const bool success = wrapped.code == rclcpp_action::ResultCode::SUCCEEDED;
+          std::string error;
+          if (!success) {
+            error = wrapped.result ? wrapped.result->error_string : "";
+          }
+          if (hooks_.on_result) {
+            hooks_.on_result(state->id, side == 0, success, error);
+          }
+        };
 
-    client(side == 0)->async_send_goal(goal, options);
+      send_goal_(side == 0, client(side == 0), goal, options);
+    } catch (...) {
+      const auto cause = std::current_exception();
+      // A send may have reached the server before throwing. Remember the
+      // cancellation even if its acceptance callback has not arrived yet.
+      state->cancel_requested.fill(true);
+      lock.unlock();
+      for (int retired_side = 0; retired_side < 2; ++retired_side) {
+        if (retired_goals[retired_side]) {
+          try {
+            cancel_goal(retired_side == 0, retired_goals[retired_side]);
+          } catch (const std::exception & ex) {
+            RCLCPP_ERROR(node_->get_logger(), "failed to cancel retired goal: %s", ex.what());
+          }
+        }
+      }
+      std::string message = "trajectory goal submission failed";
+      try {
+        std::rethrow_exception(cause);
+      } catch (const std::exception & ex) {
+        message += std::string(": ") + ex.what();
+      } catch (...) {
+        message += ": unknown exception";
+      }
+      throw DispatchError(state->id, side == 0, message);
+    }
   }
   lock.unlock();
   for (int side = 0; side < 2; ++side) {

@@ -90,7 +90,8 @@ public:
   using FollowJointTrajectory = control_msgs::action::FollowJointTrajectory;
   using DualGripperCommand = double_arm_harvest_interfaces::action::DualGripperCommand;
 
-  explicit TaskExecutor(const rclcpp::NodeOptions & options);
+  explicit TaskExecutor(
+    const rclcpp::NodeOptions & options, TrajectoryDispatcher::SendGoal send_goal = {});
   ~TaskExecutor() override;
 
   /// Construct the two MoveGroupInterfaces. Called from main() after the node
@@ -225,6 +226,7 @@ private:
   rclcpp_action::Client<DualGripperCommand>::SharedPtr gripper_client_;
   std::unique_ptr<GripperSkill> gripper_skill_;
   std::shared_ptr<TrajectoryDispatcher> dispatcher_;
+  TrajectoryDispatcher::SendGoal send_goal_;
   std::mutex goal_gate_mutex_;
   bool busy_{false};
   std::atomic<bool> cancel_requested_{false};

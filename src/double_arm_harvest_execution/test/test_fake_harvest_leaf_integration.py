@@ -26,6 +26,10 @@ from rclpy.action import ActionClient
 REACHABLE_LEFT = (0.2155, 0.4281, 0.0180)
 REACHABLE_RIGHT = (0.5689, 0.4297, 0.0225)
 ORIENTATION = (-0.1099, 0.2941, -0.2761, 0.9084)
+WORKFLOW_STAGES = (
+    'VALIDATE', 'PREPARE_GRIPPER', 'APPROACH', 'PICK', 'END_EFFECTOR',
+    'RETREAT', 'HOME', 'RELEASE_GRIPPER',
+)
 
 
 @pytest.mark.launch_test
@@ -84,8 +88,13 @@ class FakeTaskIntegration(unittest.TestCase):
                    cancel_on_pause=False):
         deadline = time.monotonic() + accept_timeout
         cancellation = {"handle": None, "stage_seen": False, "future": None}
+        stages = []
+        self._observed_stages = stages
 
         def feedback_callback(msg):
+            stage = msg.feedback.current_stage
+            if stage in WORKFLOW_STAGES and (not stages or stages[-1] != stage):
+                stages.append(stage)
             trigger = (cancel_on_gripper and msg.feedback.message == "opening enabled grippers") or (
                 cancel_on_pause and msg.feedback.state == "PAUSED")
             if not trigger:
@@ -127,12 +136,14 @@ class FakeTaskIntegration(unittest.TestCase):
         self.assertEqual(first_result.status, GoalStatus.STATUS_SUCCEEDED)
         self.assertTrue(first_result.result.success)
         self.assertEqual(first_result.result.task_id, first_goal.task_id)
+        self.assertEqual(tuple(self._observed_stages), WORKFLOW_STAGES)
 
         for task_type in ("leaf_remove", "tomato_pick"):
             handle = self._send_goal(self._goal(task_type))
             wrapped = self._wait_result(handle)
             self.assertEqual(wrapped.status, GoalStatus.STATUS_SUCCEEDED)
             self.assertTrue(wrapped.result.success)
+            self.assertEqual(tuple(self._observed_stages), WORKFLOW_STAGES)
 
     def test_single_arm_and_failure_recovery(self):
         self.assertTrue(self.client.wait_for_server(timeout_sec=60.0))

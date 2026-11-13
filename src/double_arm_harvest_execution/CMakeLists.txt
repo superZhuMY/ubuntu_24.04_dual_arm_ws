@@ -43,6 +43,7 @@ add_library(harvest_core STATIC
   src/pose_utils.cpp
   src/failure_policy.cpp
   src/task_request.cpp
+  src/task_runtime.cpp
   src/task_behavior.cpp
   src/motion_skill.cpp
   src/gripper_skill.cpp
@@ -77,11 +78,6 @@ if(BUILD_TESTING)
   target_include_directories(test_stage_barrier PRIVATE include)
   target_link_libraries(test_stage_barrier harvest_core)
 
-  ament_add_gtest(test_sync_stamp test/test_sync_stamp.cpp)
-  target_include_directories(test_sync_stamp PRIVATE include)
-  target_link_libraries(test_sync_stamp harvest_core)
-  ament_target_dependencies(test_sync_stamp rclcpp trajectory_msgs)
-
   ament_add_gtest(test_trajectory_dispatcher test/test_trajectory_dispatcher.cpp)
   target_include_directories(test_trajectory_dispatcher PRIVATE include)
   target_link_libraries(test_trajectory_dispatcher harvest_core)
@@ -97,6 +93,10 @@ if(BUILD_TESTING)
   target_include_directories(test_task_request PRIVATE include)
   target_link_libraries(test_task_request harvest_core)
 
+  ament_add_gtest(test_task_runtime test/test_task_runtime.cpp)
+  target_include_directories(test_task_runtime PRIVATE include)
+  target_link_libraries(test_task_runtime harvest_core)
+
   ament_add_gtest(test_task_behavior test/test_task_behavior.cpp)
   target_include_directories(test_task_behavior PRIVATE include)
   target_link_libraries(test_task_behavior harvest_core)
@@ -109,6 +109,11 @@ if(BUILD_TESTING)
   target_link_libraries(test_gripper_skill harvest_core)
 
   find_package(launch_testing_ament_cmake REQUIRED)
+  add_executable(test_task_executor_submit_fault test/test_task_executor_submit_fault.cpp)
+  target_link_libraries(test_task_executor_submit_fault harvest_core)
+  ament_target_dependencies(test_task_executor_submit_fault rclcpp rclcpp_action)
+  add_launch_test(test/test_task_partial_send_integration.py TIMEOUT "180"
+    ARGS "fault_executable:=$<TARGET_FILE:test_task_executor_submit_fault>")
   add_launch_test(test/test_fake_harvest_integration.py TIMEOUT "600")
   add_launch_test(test/test_fake_harvest_leaf_integration.py TIMEOUT "600")
   add_launch_test(test/test_task_recovery_integration.py TIMEOUT "600")

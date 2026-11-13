@@ -131,3 +131,16 @@ ros2 run double_arm_harvest_execution send_manual_harvest_goal.py --timeout 240
 | 一次实验的设备、参数、过程和结果 | 对应阶段报告或 [test_logs.md](test_logs.md) |
 
 新增验证结论时记录日期、执行模式、硬件 / 固件版本、实际命令与结果，区分离线单元测试、fake 集成和真机实测。
+
+### 已知问题：fake 启动退出时 MoveIt 崩溃
+
+2026-11-13 在 ROS 2 Jazzy 的 `moveit_ros_move_group` 2.12.4 环境中，
+fake 启动退出时观察到 `move_group` 以 `-11` 退出；单独启动
+`stm32_moveit.launch.py hardware_mode:=fake start_rviz:=false`，不启动任务执行器时也能复现。
+原始栈位于 `rclcpp::Executor` 析构阶段，原因尚未确认；任务完成并不代表整个系统正常退出。
+一次动态加载跟踪显示崩溃地址位于已卸载的 Pilz `libsequence_capability.so` 地址范围内，
+提示插件与回调对象生命周期可能有关。一次仅在临时环境中保留该库的实验里
+`move_group` 正常退出，但这不足以证明其他环境可靠，也没有作为工程修复采用。
+`test_task_partial_send_integration.py` 现在检查任务执行器和 `move_group` 的退出码，
+因此当前环境的全量测试会报告该失败。不要将其作为通过或跳过处理。
+未连接真实硬件，上述观察不构成真机验证。

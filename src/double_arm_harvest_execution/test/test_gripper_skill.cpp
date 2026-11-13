@@ -31,6 +31,16 @@ public:
   bool accept{true};
   bool success{true};
   bool defer_result{false};
+  bool throw_after_send{false};
+  bool cancel_sent{false};
+
+  void deliver_goal_response()
+  {
+    auto callback = std::move(pending_goal_);
+    auto response = std::make_shared<Action::Impl::SendGoalService::Response>();
+    response->accepted = accept;
+    callback(response);
+  }
 
   void deliver_result()
   {
@@ -46,6 +56,10 @@ public:
 protected:
   void send_goal_request(std::shared_ptr<void>, ResponseCallback callback) override
   {
+    if (throw_after_send) {
+      pending_goal_ = std::move(callback);
+      throw std::runtime_error("injected error after send");
+    }
     auto response = std::make_shared<Action::Impl::SendGoalService::Response>();
     response->accepted = accept;
     callback(response);
@@ -61,10 +75,12 @@ protected:
 
   void send_cancel_request(std::shared_ptr<void>, ResponseCallback callback) override
   {
+    cancel_sent = true;
     callback(std::make_shared<CancelResponse>());
   }
 
 private:
+  ResponseCallback pending_goal_;
   ResponseCallback pending_result_;
 };
 
@@ -117,6 +133,23 @@ TEST_F(GripperSkillTest, LateResultAfterTimeoutReleasesRecoveryGate)
   EXPECT_NE(error.find("cancellation was not confirmed"), std::string::npos);
   EXPECT_TRUE(recovery_->load());
   // command() and its future have gone away; the callback must still be safe.
+  client_->deliver_result();
+  EXPECT_FALSE(recovery_->load());
+}
+
+TEST_F(GripperSkillTest, SendExceptionKeepsGateClosedAndCancelsLateAcceptance)
+{
+  client_->throw_after_send = true;
+  client_->defer_result = true;
+  std::string error;
+  bool succeeded = true;
+  EXPECT_NO_THROW(succeeded = skill_.command(true, true, 0.0, 0, error));
+  EXPECT_FALSE(succeeded);
+  EXPECT_NE(error.find("injected error after send"), std::string::npos);
+  EXPECT_TRUE(recovery_->load());
+  client_->deliver_goal_response();
+  EXPECT_TRUE(client_->cancel_sent);
+  EXPECT_TRUE(recovery_->load());
   client_->deliver_result();
   EXPECT_FALSE(recovery_->load());
 }

@@ -3,6 +3,7 @@
 #include "double_arm_harvest_execution/gripper_skill.hpp"
 
 #include <chrono>
+#include <exception>
 #include <future>
 #include <memory>
 
@@ -99,8 +100,23 @@ bool GripperSkill::command(
     try {
       goal_future = client_->async_send_goal(goal, options);
     } catch (...) {
-      recovery_required_->store(false);
-      throw;
+      const auto cause = std::current_exception();
+      // The request may already have left the process. Preserve the recovery
+      // gate until a rejection or terminal result, and cancel a late accept.
+      try {
+        cancel_request();
+      } catch (...) {
+        // Keep the gate closed if cancellation itself cannot be submitted.
+      }
+      error = "gripper goal submission failed";
+      try {
+        std::rethrow_exception(cause);
+      } catch (const std::exception & ex) {
+        error += std::string(": ") + ex.what();
+      } catch (...) {
+        error += ": unknown exception";
+      }
+      return false;
     }
   }
   bool cancel_sent = false;

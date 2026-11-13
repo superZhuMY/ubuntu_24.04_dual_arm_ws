@@ -12,6 +12,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 
 #include <control_msgs/action/follow_joint_trajectory.hpp>
@@ -27,6 +28,22 @@ class TrajectoryDispatcher
 public:
   using FollowJointTrajectory = control_msgs::action::FollowJointTrajectory;
   using GoalHandleFJT = rclcpp_action::ClientGoalHandle<FollowJointTrajectory>;
+  using ActionClient = rclcpp_action::Client<FollowJointTrajectory>;
+  using SendGoal = std::function<void(
+      bool, const ActionClient::SharedPtr &, const FollowJointTrajectory::Goal &,
+      const ActionClient::SendGoalOptions &)>;
+
+  class DispatchError : public std::runtime_error
+  {
+  public:
+    DispatchError(uint64_t id, bool failed_left, const std::string & reason)
+    : std::runtime_error(reason), id_(id), failed_left_(failed_left) {}
+    uint64_t dispatch_id() const {return id_;}
+    bool failed_left() const {return failed_left_;}
+  private:
+    uint64_t id_;
+    bool failed_left_;
+  };
 
   /// Outcome hooks, always invoked on executor threads. Late callbacks retain
   /// their original dispatch ID; the coordinator must ignore retired IDs.
@@ -41,7 +58,7 @@ public:
     rclcpp::Node::SharedPtr node, const std::string & left_action,
     const std::string & right_action, const std::string & left_joints_log,
     const std::string & right_joints_log, Hooks hooks,
-    rclcpp::CallbackGroup::SharedPtr group);
+    rclcpp::CallbackGroup::SharedPtr group, SendGoal send_goal = {});
 
   /// True when both action servers are available.
   bool wait_for_servers(double timeout_sec) const;
@@ -74,6 +91,7 @@ private:
 
   rclcpp::Node::SharedPtr node_;
   Hooks hooks_;
+  SendGoal send_goal_;
   std::array<rclcpp_action::Client<FollowJointTrajectory>::SharedPtr, 2> clients_{};
   struct DispatchState
   {

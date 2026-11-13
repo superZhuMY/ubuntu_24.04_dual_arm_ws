@@ -35,8 +35,8 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64MultiArray
 
 
-@pytest.mark.launch_test
-def generate_test_description():
+def make_test_description(executable='dual_arm_harvest_executor',
+                          package='double_arm_harvest_execution'):
     share = Path(get_package_share_directory('double_arm_robot_moveit_config'))
     execution = Path(get_package_share_directory('double_arm_harvest_execution'))
     config = MoveItConfigsBuilder(
@@ -52,7 +52,7 @@ def generate_test_description():
             str(share / 'launch/stm32_moveit.launch.py')),
             launch_arguments={'hardware_mode': 'fake', 'start_rviz': 'false',
                               'allow_simultaneous_arms': 'true'}.items()),
-        Node(package='double_arm_harvest_execution', executable='dual_arm_harvest_executor',
+        Node(package=package, executable=executable,
              name='dual_arm_harvest_executor', output='screen', parameters=[
                  {'robot_description': Command([
                      'xacro ', str(share / 'config/double_arm_robot.urdf.xacro'),
@@ -64,6 +64,11 @@ def generate_test_description():
                          ('/double_arm_robot/r_arm/follow_joint_trajectory', '/recovery/right')]),
         launch_testing.actions.ReadyToTest(),
     ])
+
+
+@pytest.mark.launch_test
+def generate_test_description():
+    return make_test_description()
 
 
 class TaskRecoveryIntegration(unittest.TestCase):
