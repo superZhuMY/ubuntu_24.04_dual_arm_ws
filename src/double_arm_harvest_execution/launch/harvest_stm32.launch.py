@@ -6,7 +6,7 @@ only adds:
     two arms may run concurrently (calibration launches keep the default
     false);
   - the RS485 gripper controller with its checked-in configuration;
-  - dual_arm_harvest_executor with the single manual-target workflow.
+  - dual_arm_harvest_executor with the configured task workflow.
 
 The launch never sends a motion goal by itself. After "move groups ready",
 run send_manual_harvest_goal.py with the YAML containing the measured points.
@@ -48,6 +48,7 @@ def _node_override(**params):
 
 def generate_launch_description():
     args = {
+        "workflow_backend": ("legacy", ["legacy", "python"]),
         "stm32_device": (
             "/dev/serial/by-path/pci-0000:06:00.3-usb-0:2.2.2:1.0-port0", None),
         "stm32_baud_rate": ("115200", None),
@@ -139,14 +140,23 @@ def generate_launch_description():
     def _harvest_node(context):
         motor_enabled = LaunchConfiguration("allow_motor_enable").perform(context) == "true"
         gripper_enabled = LaunchConfiguration("gripper_allow_motion").perform(context) == "true"
-        override = _node_override(allow_task_motion=motor_enabled and gripper_enabled)
-        return [Node(
+        backend = lcs["workflow_backend"].perform(context)
+        override = _node_override(
+            allow_task_motion=motor_enabled and gripper_enabled, workflow_backend=backend)
+        actions = [Node(
             package="double_arm_harvest_execution",
             executable="dual_arm_harvest_executor",
             name=NODE_NAME,
             output="screen",
             parameters=harvest_params + [override],
         )]
+        if backend == "python":
+            actions.append(Node(
+                package="double_arm_harvest_execution",
+                executable="harvest_workflow_worker.py",
+                output="screen",
+            ))
+        return actions
 
     include_arguments = {
         "hardware_mode": "real",

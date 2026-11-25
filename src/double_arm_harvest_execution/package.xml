@@ -8,6 +8,7 @@
   <license>BSD-3-Clause</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>ament_cmake_python</buildtool_depend>
 
   <depend>rclcpp</depend>
   <depend>rclcpp_action</depend>
@@ -22,7 +23,7 @@
   <depend>tf2_geometry_msgs</depend>
   <depend>double_arm_harvest_interfaces</depend>
 
-  <!-- Manual goal sender (rclpy) -->
+  <!-- Workflow worker and manual goal sender -->
   <exec_depend>rclpy</exec_depend>
   <exec_depend>python3-yaml</exec_depend>
   <exec_depend>ros2launch</exec_depend>

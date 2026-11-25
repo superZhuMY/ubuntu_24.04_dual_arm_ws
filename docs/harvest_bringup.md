@@ -1,17 +1,17 @@
-# 双臂手动点位采摘流程
+# 双臂手动点位采摘与打叶
 
-## 1. 唯一执行流程
+## 1. 采摘与打叶的动作顺序
 
-执行层只接受用户提供的左、右 TCP 点位，不生成目标点，也不做随机 IK 探测。每个
-启用的机械臂执行同一套流程：
+任务提交方提供启用臂的 TCP 点位。采摘与打叶的当前流程使用相同的基础技能序列，
+打叶按臂分工配置双臂回撤时序。
 
 ```text
 VALIDATE
   -> PREPARE_GRIPPER（打开夹爪）
   -> APPROACH（当前关节状态作为种子，对接近点求解一次 IK）
-  -> PICK（只增加 J3）
+  -> PICK（仅伸出 J3）
   -> END_EFFECTOR（闭合夹爪）
-  -> RETREAT（只减小 J3）
+  -> RETREAT（仅回撤 J3）
   -> HOME（回命名关节位）
   -> RELEASE_GRIPPER（确认 HOME 成功后松开夹爪）
 ```
@@ -70,11 +70,11 @@ fake 启动始终包含 mock 夹爪和完整动作链，不再提供 `dry_run`�
 | 模式 | 行为 |
 |---|---|
 | `tomato_pick` | 双臂阶段同步，保留现有采摘流程 |
-| `leaf_remove` | 保留原打叶流程；仅双臂 RETREAT 错开，右臂先缩 J3，等待 `leaf_left_retreat_delay_sec`（默认 3.0 s）后左臂再缩 |
+| `leaf_remove` | 仅双臂 RETREAT 错开。默认右臂先启动 J3 回撤，左臂相对于共享开始时间延迟 3.0 s |
 
-目标和执行臂也随 Action Goal 提交。当前双臂打叶默认角色是左臂 `hold`、右臂
-`operate`；`hold` 角色表示保持臂在 RETREAT 阶段等待操作臂回撤后再回撤，其他角色组合会被拒绝。当前动作顺序、两侧夹爪阶段及双臂规划保持既有流程。参数 `legacy_task_type` 只用于兼容旧
-`/execute_dual_harvest` 接口：
+目标和执行臂也随 Action Goal 提交。当前双臂打叶允许左臂 `hold`、右臂 `operate`，省略角色时
+会填入相同的默认值。两侧相对于共用开始时间各有配置的延迟，阶段等待两侧回撤均成功。
+参数 `legacy_task_type` 为旧 `/execute_dual_harvest` 接口提供任务类型。
 
 ```yaml
 legacy_task_type: tomato_pick   # tomato_pick | leaf | leaf_remove
@@ -87,6 +87,7 @@ leaf_right_retreat_delay_sec: 0.0
 ```bash
 ros2 run double_arm_harvest_execution send_manual_harvest_goal.py --task-type tomato_pick
 ros2 run double_arm_harvest_execution send_manual_harvest_goal.py --task-type leaf_remove
+ros2 run double_arm_harvest_execution send_manual_harvest_goal.py --task-type tomato_pick
 ```
 
 单臂运行时不错开。打叶延迟策略由 Action Goal 的角色组合触发，依赖流式执行器遵守轨迹
@@ -108,6 +109,26 @@ ros2 launch double_arm_bringup robot.launch.py mode:=real
 状态读取链，不提供任务 Action 或运动控制器。`real` 的电机和夹爪使能默认关闭；
 经过现场检查并明确需要运动时，需分别传入 `allow_motor_enable:=true` 和
 `gripper_allow_motion:=true`。只打开其中一个仍会拒绝任务。
+
+## 3.3 在 fake 中启用 Python 流程
+
+`harvest_fake.launch.py` 和 `harvest_stm32.launch.py` 默认使用 `workflow_backend:=legacy`。
+统一 launch 的 `fake` 和 `real` 模式会转发同一选项。验证 Python 流程时，从 fake 入口启动，
+并用手工点位脚本提交任务。
+
+~~~bash
+ros2 launch double_arm_bringup robot.launch.py mode:=fake workflow_backend:=python
+~~~
+
+采摘和打叶各有独立的技能顺序文件。
+[tomato_pick.py](../src/double_arm_harvest_execution/double_arm_harvest_workflows/tomato_pick.py) ·
+[leaf_remove.py](../src/double_arm_harvest_execution/double_arm_harvest_workflows/leaf_remove.py)
+
+两个任务 Action 使用同一后端，任务类型仍可逐 Goal 切换。切换后端需要重启 launch。
+迁移期间用相同的 fake 目标比较两个后端的阶段、启用臂、回撤时序、成功和故障恢复行为，再评估切换默认后端。
+
+若 Python 工作节点退出，当前技能仍由 C++ 收尾。下一次查步骤或最终完成确认失败时，任务反馈
+`PAUSED` 和 `current_stage=WORKFLOW`。恢复工作节点后，先按下文取消旧任务，再提交新的任务。
 
 ## 4. STM32 实机启动
 

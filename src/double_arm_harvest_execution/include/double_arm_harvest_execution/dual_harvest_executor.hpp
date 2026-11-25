@@ -28,6 +28,7 @@
 #include <double_arm_harvest_interfaces/action/dual_gripper_command.hpp>
 #include <double_arm_harvest_interfaces/action/execute_dual_harvest.hpp>
 #include <double_arm_harvest_interfaces/action/execute_task.hpp>
+#include <double_arm_harvest_interfaces/srv/get_workflow_step.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
@@ -41,7 +42,6 @@
 #include "double_arm_harvest_execution/trajectory_dispatcher.hpp"
 #include "double_arm_harvest_execution/motion_skill.hpp"
 #include "double_arm_harvest_execution/task_request.hpp"
-#include "double_arm_harvest_execution/task_behavior.hpp"
 
 namespace moveit
 {
@@ -59,24 +59,6 @@ class TransformListener;
 
 namespace double_arm_harvest_execution
 {
-
-/// Task-level state machine stages (plan doc 8.1).
-enum class Stage
-{
-  VALIDATE,
-  PREPARE_GRIPPER,
-  APPROACH,
-  PICK,
-  END_EFFECTOR,
-  RETREAT,
-  HOME,
-  RELEASE_GRIPPER,
-};
-
-std::string stage_name(Stage stage);
-
-/// Stages that actually move an arm and go through the dispatch barrier.
-bool is_motion_stage(Stage stage);
 
 class TaskExecutor : public rclcpp::Node
 {
@@ -100,6 +82,9 @@ public:
   void init_move_groups();
 
 private:
+  using GetWorkflowStep = double_arm_harvest_interfaces::srv::GetWorkflowStep;
+  using WorkflowStep = GetWorkflowStep::Response;
+
   enum class GoalTermination { SUCCEEDED, ABORTED, CANCELED };
   struct GoalCallbacks
   {
@@ -126,8 +111,9 @@ private:
     const std::shared_ptr<GoalHandleTask> goal_handle);
   void on_legacy_accepted(const std::shared_ptr<GoalHandleHarvest> goal_handle);
   void on_task_accepted(const std::shared_ptr<GoalHandleTask> goal_handle);
-  rclcpp_action::GoalResponse accept_request(const TaskRequest & request);
-  void request_cancel();
+  rclcpp_action::GoalResponse accept_request(
+    const TaskRequest & request, const rclcpp_action::GoalUUID & uuid);
+  rclcpp_action::CancelResponse request_cancel(const rclcpp_action::GoalUUID & uuid);
 
   // ---- task execution ----
   void execute(const std::shared_ptr<GoalHandleHarvest> goal_handle);
@@ -135,6 +121,18 @@ private:
   void execute_request(const TaskRequest & request, const GoalCallbacks & callbacks);
   TaskRequest convert_legacy_goal(const HarvestGoal & goal);
   TaskRequest convert_task_goal(const TaskGoal & goal);
+
+  GetWorkflowStep::Request::SharedPtr make_workflow_query(const TaskRequest & request) const;
+  WorkflowStep::SharedPtr query_workflow_step(
+    const GetWorkflowStep::Request::SharedPtr & query,
+    std::string & worker_id, float progress, std::string & error);
+  WorkflowStep legacy_step(
+    const TaskRequest & request, uint32_t completed_steps) const;
+
+  /// Plan every selected arm before dispatching and wait for terminal results.
+  bool run_motion_skill(
+    const TaskRequest & request, const WorkflowStep & step,
+    const std::vector<std::string> & required_joints, std::string & error);
 
   /// Returns the validation error for one target, or nullopt when valid.
   std::optional<std::string> validate_target(
@@ -193,6 +191,8 @@ private:
   double stage_timeout_sec_{30.0};
   double cancel_timeout_sec_{3.0};
   bool allow_task_motion_{false};
+  bool use_python_workflow_{false};
+  double workflow_step_timeout_sec_{2.0};
   TaskType legacy_task_type_{TaskType::TOMATO_PICK};
   std::string gripper_action_name_;
   double gripper_open_position_{0.0};
@@ -214,7 +214,7 @@ private:
   std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
   std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
   std::string planning_frame_;
-  bool move_groups_ready_{false};
+  std::atomic<bool> move_groups_ready_{false};
 
   // ---- action server / task gate ----
   rclcpp::CallbackGroup::SharedPtr server_cb_group_;
@@ -223,12 +223,14 @@ private:
   rclcpp::CallbackGroup::SharedPtr gripper_cb_group_;
   rclcpp_action::Server<ExecuteDualHarvest>::SharedPtr action_server_;
   rclcpp_action::Server<ExecuteTask>::SharedPtr task_action_server_;
+  rclcpp::Client<GetWorkflowStep>::SharedPtr workflow_client_;
   rclcpp_action::Client<DualGripperCommand>::SharedPtr gripper_client_;
   std::unique_ptr<GripperSkill> gripper_skill_;
   std::shared_ptr<TrajectoryDispatcher> dispatcher_;
   TrajectoryDispatcher::SendGoal send_goal_;
   std::mutex goal_gate_mutex_;
   bool busy_{false};
+  std::optional<rclcpp_action::GoalUUID> active_goal_id_;
   std::atomic<bool> cancel_requested_{false};
   std::atomic<bool> recovery_required_{false};
   std::shared_ptr<std::atomic<bool>> gripper_recovery_required_{

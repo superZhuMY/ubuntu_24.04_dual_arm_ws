@@ -1,0 +1,36 @@
+# Internal query from the C++ task owner. Repeated queries have no side effects.
+# completed_steps counts skills that reached successful terminal results.
+string task_id
+string task_type
+double_arm_harvest_interfaces/TaskTarget left_target
+double_arm_harvest_interfaces/TaskTarget right_target
+bool execute_left
+bool execute_right
+string left_role
+string right_role
+float64 left_retreat_delay_sec
+float64 right_retreat_delay_sec
+uint32 completed_steps
+---
+uint8 DONE=0
+uint8 OPEN_GRIPPER=1
+uint8 CLOSE_GRIPPER=2
+uint8 MOVE_TCP=3
+uint8 EXTEND_J3=4
+uint8 RETRACT_J3=5
+uint8 MOVE_HOME=6
+
+# Identifies the worker incarnation that selected the step.
+string worker_id
+string error
+uint8 skill
+string stage
+bool execute_left
+bool execute_right
+# MOVE_TCP may use the configured J3 approach offset from the task's TCP pose.
+bool use_j3_standoff
+# Optional additional start delays relative to the common trajectory stamp.
+float64 left_delay_sec
+float64 right_delay_sec
+# Task progress after the skill succeeds, in [0, 1].
+float32 progress

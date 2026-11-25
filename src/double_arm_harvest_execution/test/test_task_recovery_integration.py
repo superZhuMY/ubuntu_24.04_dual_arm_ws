@@ -23,9 +23,9 @@ from ament_index_python.packages import get_package_share_directory
 from control_msgs.action import FollowJointTrajectory
 from double_arm_harvest_interfaces.action import (
     DualGripperCommand, ExecuteDualHarvest, ExecuteTask)
-from launch.actions import IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import Command
+from launch.substitutions import Command, LaunchConfiguration
 from launch_ros.actions import Node
 from moveit_configs_utils import MoveItConfigsBuilder
 from rclpy.action import ActionClient, ActionServer, CancelResponse, GoalResponse
@@ -35,33 +35,53 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64MultiArray
 
 
+def workflow_worker_node():
+    return Node(package='double_arm_harvest_execution', executable='harvest_workflow_worker.py',
+                name='harvest_workflow_worker', output='screen')
+
+
 def make_test_description(executable='dual_arm_harvest_executor',
-                          package='double_arm_harvest_execution'):
+                          package='double_arm_harvest_execution',
+                          workflow_backend_default='legacy', workflow_worker=None, **parameters):
     share = Path(get_package_share_directory('double_arm_robot_moveit_config'))
     execution = Path(get_package_share_directory('double_arm_harvest_execution'))
     config = MoveItConfigsBuilder(
         'double_arm_robot', package_name='double_arm_robot_moveit_config').to_moveit_configs()
-    override = tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False)
-    yaml.safe_dump({'dual_arm_harvest_executor': {'ros__parameters': {
-        'allow_task_motion': True, 'gripper_action_name': '/recovery/gripper',
-        'gripper_action_timeout_sec': 1.0, 'cancel_timeout_sec': 0.5,
-        'goal_accept_timeout_sec': 1.5, 'stage_timeout_sec': 10.0}}}, override)
-    override.close()
+
+    def task_nodes(context):
+        backend = LaunchConfiguration('workflow_backend').perform(context)
+        values = {
+            'allow_task_motion': True, 'gripper_action_name': '/recovery/gripper',
+            'gripper_action_timeout_sec': 1.0, 'cancel_timeout_sec': 0.5,
+            'goal_accept_timeout_sec': 1.5, 'stage_timeout_sec': 10.0,
+            'workflow_backend': backend,
+        }
+        values.update(parameters)
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as override:
+            yaml.safe_dump({'dual_arm_harvest_executor': {'ros__parameters': values}}, override)
+        task_node = Node(
+            package=package, executable=executable, name='dual_arm_harvest_executor',
+            output='screen', parameters=[
+                {'robot_description': Command([
+                    'xacro ', str(share / 'config/double_arm_robot.urdf.xacro'),
+                    ' hardware_mode:=fake'])},
+                config.robot_description_semantic, config.robot_description_kinematics,
+                str(execution / 'config/harvest_motion.yaml'), override.name],
+            remappings=[('/double_arm_robot/l_arm/follow_joint_trajectory', '/recovery/left'),
+                        ('/double_arm_robot/r_arm/follow_joint_trajectory', '/recovery/right')])
+        if backend == 'python':
+            return [workflow_worker if workflow_worker is not None else workflow_worker_node(),
+                    task_node]
+        return [task_node]
+
     return launch.LaunchDescription([
+        DeclareLaunchArgument('workflow_backend', default_value=workflow_backend_default,
+                              choices=['legacy', 'python']),
         IncludeLaunchDescription(PythonLaunchDescriptionSource(
             str(share / 'launch/stm32_moveit.launch.py')),
             launch_arguments={'hardware_mode': 'fake', 'start_rviz': 'false',
                               'allow_simultaneous_arms': 'true'}.items()),
-        Node(package=package, executable=executable,
-             name='dual_arm_harvest_executor', output='screen', parameters=[
-                 {'robot_description': Command([
-                     'xacro ', str(share / 'config/double_arm_robot.urdf.xacro'),
-                     ' hardware_mode:=fake'])},
-                 config.robot_description_semantic, config.robot_description_kinematics,
-                 str(execution / 'config/harvest_motion.yaml'),
-                 override.name],
-             remappings=[('/double_arm_robot/l_arm/follow_joint_trajectory', '/recovery/left'),
-                         ('/double_arm_robot/r_arm/follow_joint_trajectory', '/recovery/right')]),
+        OpaqueFunction(function=task_nodes),
         launch_testing.actions.ReadyToTest(),
     ])
 
@@ -81,6 +101,7 @@ class TaskRecoveryIntegration(unittest.TestCase):
         cls.positions = {}
         cls.state_updates = 0
         cls.events = []
+        cls.commands = []
         cls.release = threading.Event()
         cls.accept_release = threading.Event()
         cls.group = ReentrantCallbackGroup()
@@ -135,8 +156,15 @@ class TaskRecoveryIntegration(unittest.TestCase):
             cls.events.append((kind, side, time.monotonic()))
 
     @classmethod
-    def accept_downstream(cls, side, _goal):
+    def accept_downstream(cls, side, goal):
         cls.record('request', side)
+        with cls.lock:
+            if side == 'gripper':
+                cls.commands.append((side, goal.command_left, goal.command_right,
+                                     goal.left_position, goal.right_position))
+            else:
+                stamp = goal.trajectory.header.stamp
+                cls.commands.append((side, stamp.sec * 1_000_000_000 + stamp.nanosec))
         if cls.state.get('mode') == 'gripper_reject' and side == 'gripper':
             cls.record('rejected', side)
             return GoalResponse.REJECT
@@ -233,13 +261,15 @@ class TaskRecoveryIntegration(unittest.TestCase):
         self.accept_release.clear()
         with self.lock:
             self.events.clear()
+            self.commands.clear()
 
-    def goal(self, api, invalid=False):
+    def goal(self, api, invalid=False, task_type='tomato_pick', left=True, right=True):
         goal = ExecuteTask.Goal() if api == 'new' else ExecuteDualHarvest.Goal()
         if api == 'new':
             goal.task_id = str(uuid.uuid4())
-            goal.task_type = 'tomato_pick'
-        goal.execute_left = goal.execute_right = True
+            goal.task_type = task_type
+        goal.execute_left = left
+        goal.execute_right = right
         for side, xyz in [('left', (0.2155, 0.4281, 0.0180)),
                           ('right', (0.5689, 0.4297, 0.0225))]:
             target = getattr(goal, side + '_target')
@@ -252,12 +282,14 @@ class TaskRecoveryIntegration(unittest.TestCase):
             q.x, q.y, q.z, q.w = (-0.1099, 0.2941, -0.2761, 0.9084)
         return goal
 
-    def submit(self, api, invalid=False, wait_ready=False):
+    def submit(self, api, invalid=False, wait_ready=False, goal=None):
         feedback = []
+        if goal is None:
+            goal = self.goal(api, invalid)
         deadline = time.monotonic() + (90 if wait_ready else 10)
         while True:
             handle = self.wait(self.clients[api].send_goal_async(
-                self.goal(api, invalid), feedback_callback=lambda m: feedback.append(m.feedback)))
+                goal, feedback_callback=lambda m: feedback.append(m.feedback)))
             if handle.accepted or not wait_ready or time.monotonic() >= deadline:
                 if handle.accepted:
                     self.active_handle = handle
@@ -270,7 +302,7 @@ class TaskRecoveryIntegration(unittest.TestCase):
             self.assertFalse(handle.accepted, f'{api} admitted an overlapping task')
 
     def paused(self, feedback):
-        return any(f.left_stage == 'PAUSED' for f in feedback)
+        return any('PAUSED' in (f.left_stage, f.right_stage) for f in feedback)
 
     def recover(self, api):
         self.state['mode'] = 'normal'
@@ -300,6 +332,45 @@ class TaskRecoveryIntegration(unittest.TestCase):
                     GoalStatus.STATUS_SUCCEEDED, GoalStatus.STATUS_CANCELED, GoalStatus.STATUS_ABORTED):
                 self.wait(handle.cancel_goal_async())
                 self.wait(handle.get_result_async())
+
+    def test_task_order_and_scheduled_arm_starts(self):
+        cases = [
+            ('tomato_pick', True, True, 0),
+            ('leaf_remove', True, True, 3_000_000_000),
+            ('tomato_pick', True, True, 0),
+            ('leaf_remove', True, False, 0),
+            ('leaf_remove', False, True, 0),
+        ]
+        for task_type, left, right, retreat_delay in cases:
+            with self.subTest(task_type=task_type, left=left, right=right), self.case_cleanup():
+                self.reset_fault('normal')
+                goal = self.goal('new', task_type=task_type, left=left, right=right)
+                handle, feedback = self.submit('new', wait_ready=True, goal=goal)
+                self.assertTrue(handle.accepted)
+                wrapped = self.wait(handle.get_result_async(), 30)
+                self.assertEqual(wrapped.status, GoalStatus.STATUS_SUCCEEDED)
+                self.assertTrue(wrapped.result.success)
+                self.assertFalse(self.paused(feedback))
+                self.assertEqual((wrapped.result.left_success, wrapped.result.right_success),
+                                 (left, right))
+                with self.lock:
+                    commands = self.commands[:]
+                enabled_arms = {
+                    side for side, enabled in [('left', left), ('right', right)] if enabled}
+                arm_count = len(enabled_arms)
+                self.assertEqual(len(commands), 3 + 4 * arm_count)
+                self.assertEqual(commands.pop(0), ('gripper', left, right, 0.0, 0.0))
+                for stage in ('APPROACH', 'PICK', 'RETREAT', 'HOME'):
+                    if stage == 'RETREAT':
+                        self.assertEqual(commands.pop(0), ('gripper', left, right, 1.0, 1.0))
+                    starts = dict(commands[:arm_count])
+                    del commands[:arm_count]
+                    self.assertEqual(set(starts), enabled_arms, stage)
+                    self.assertTrue(all(start > 0 for start in starts.values()))
+                    if left and right:
+                        expected_delay = retreat_delay if stage == 'RETREAT' else 0
+                        self.assertEqual(starts['left'] - starts['right'], expected_delay)
+                self.assertEqual(commands, [('gripper', left, right, 0.0, 0.0)])
 
     def test_fault_matrix(self):
         cases = [('validate', False, False, 'canceled'), ('arm_cancel', False, False, 'canceled'),

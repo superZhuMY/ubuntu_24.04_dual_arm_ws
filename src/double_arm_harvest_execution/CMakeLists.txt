@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.8)
 project(double_arm_harvest_execution)
 
 find_package(ament_cmake REQUIRED)
+find_package(ament_cmake_python REQUIRED)
 
 if(NOT CMAKE_CXX_STANDARD)
   set(CMAKE_CXX_STANDARD 17)
@@ -45,6 +46,8 @@ add_library(harvest_core STATIC
   src/task_request.cpp
   src/task_runtime.cpp
   src/task_behavior.cpp
+  src/task_workflow.cpp
+  src/task_skills.cpp
   src/motion_skill.cpp
   src/gripper_skill.cpp
   src/stage_barrier.cpp
@@ -62,7 +65,10 @@ ament_target_dependencies(dual_arm_harvest_executor rclcpp rclcpp_action)
 
 install(TARGETS dual_arm_harvest_executor DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY config launch DESTINATION share/${PROJECT_NAME})
-install(PROGRAMS scripts/send_manual_harvest_goal.py
+ament_python_install_package(double_arm_harvest_workflows)
+install(PROGRAMS
+  scripts/send_manual_harvest_goal.py
+  scripts/harvest_workflow_worker.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -103,6 +109,8 @@ if(BUILD_TESTING)
 
   ament_add_pytest_test(test_manual_target_conversion test/test_manual_target_conversion.py)
   ament_add_pytest_test(test_manual_task_sender test/test_manual_task_sender.py)
+  ament_add_pytest_test(test_python_workflows test/test_python_workflows.py
+    APPEND_ENV PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR})
 
   ament_add_gtest(test_gripper_skill test/test_gripper_skill.cpp)
   target_include_directories(test_gripper_skill PRIVATE include)
@@ -118,6 +126,15 @@ if(BUILD_TESTING)
   add_launch_test(test/test_fake_harvest_leaf_integration.py TIMEOUT "600")
   add_launch_test(test/test_task_recovery_integration.py TIMEOUT "600")
   add_launch_test(test/test_fake_harvest_pause.py TIMEOUT "180")
+  add_launch_test(test/test_fake_harvest_leaf_integration.py TIMEOUT "600"
+    TARGET test_python_workflow_fake_integration ARGS "workflow_backend:=python")
+  add_launch_test(test/test_task_recovery_integration.py TIMEOUT "600"
+    TARGET test_python_workflow_recovery_integration ARGS "workflow_backend:=python")
+  add_launch_test(test/test_task_partial_send_integration.py TIMEOUT "180"
+    TARGET test_python_workflow_partial_send_integration
+    ARGS "fault_executable:=$<TARGET_FILE:test_task_executor_submit_fault>"
+    "workflow_backend:=python")
+  add_launch_test(test/test_python_workflow_faults.py TIMEOUT "180")
 endif()
 
 ament_package()

@@ -31,6 +31,8 @@ class RobotLaunchConfig(unittest.TestCase):
             if isinstance(action, DeclareLaunchArgument)
         }
         self.assertEqual(arguments["mode"].choices, ["fake", "readonly", "real"])
+        self.assertEqual(arguments["workflow_backend"].choices, ["legacy", "python"])
+        self.assertEqual(arguments["workflow_backend"].default_value[0].text, "legacy")
         includes = [
             action for action in description.entities
             if isinstance(action, IncludeLaunchDescription)
@@ -41,9 +43,9 @@ class RobotLaunchConfig(unittest.TestCase):
         self.assertIn("harvest_fake.launch.py", locations[0])
         self.assertIn("f2_stm32_readonly.launch.py", locations[1])
         self.assertIn("harvest_stm32.launch.py", locations[2])
-        self.assertEqual(set(dict(includes[0].launch_arguments)), {"start_rviz"})
+        self.assertEqual(set(dict(includes[0].launch_arguments)), {"start_rviz", "workflow_backend"})
         self.assertEqual(set(dict(includes[1].launch_arguments)), {"stm32_device"})
-        self.assertTrue({"allow_motor_enable", "gripper_allow_motion"}.issubset(
+        self.assertTrue({"allow_motor_enable", "gripper_allow_motion", "workflow_backend"}.issubset(
             dict(includes[2].launch_arguments)))
 
     def test_real_motion_gates_default_closed(self):

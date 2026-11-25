@@ -14,7 +14,7 @@ E.5, but with Stm32SystemHardware as the single 12-axis ros2_control plugin.
 import os
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.conditions import IfCondition
 from launch.substitutions import (
     Command,
@@ -49,6 +49,7 @@ def generate_launch_description():
         "stm32_read_only": ("false", ["true", "false"]),
         "allow_motor_enable": ("false", ["true", "false"]),
         "start_rviz": ("true", ["true", "false"]),
+        "fake_keep_moveit_plugins": ("true", ["true", "false"]),
         # Calibration/sparse default stays false; harvest_stm32.launch.py
         # includes this launch with true to dispatch both arms together.
         "allow_simultaneous_arms": ("false", ["true", "false"]),
@@ -198,16 +199,29 @@ def generate_launch_description():
             lcs["allow_simultaneous_arms"], value_type=bool)}],
         condition=streaming_condition,
     ))
-    nodes.append(Node(
-        package="moveit_ros_move_group", executable="move_group", output="screen",
-        remappings=[
-            ("l_arm/follow_joint_trajectory",
-             "/double_arm_robot/l_arm/follow_joint_trajectory"),
-            ("r_arm/follow_joint_trajectory",
-             "/double_arm_robot/r_arm/follow_joint_trajectory"),
-        ],
-        parameters=move_group_params,
-    ))
+    def start_move_group(context):
+        extra_env = {}
+        if (lcs["hardware_mode"].perform(context) == "fake"
+                and lcs["fake_keep_moveit_plugins"].perform(context) == "true"):
+            # MoveIt Jazzy 2.12.4 can unload these plugins before rclcpp
+            # destroys callbacks they created. Keep the libraries mapped for
+            # this fake move_group process so normal shutdown can finish.
+            preload = context.environment.get("LD_PRELOAD", "").split()
+            preload.extend(("libsequence_capability.so", "libmoveit_simple_controller_manager.so"))
+            extra_env["LD_PRELOAD"] = " ".join(preload)
+        return [Node(
+            package="moveit_ros_move_group", executable="move_group", output="screen",
+            remappings=[
+                ("l_arm/follow_joint_trajectory",
+                 "/double_arm_robot/l_arm/follow_joint_trajectory"),
+                ("r_arm/follow_joint_trajectory",
+                 "/double_arm_robot/r_arm/follow_joint_trajectory"),
+            ],
+            parameters=move_group_params,
+            additional_env=extra_env,
+        )]
+
+    nodes.append(OpaqueFunction(function=start_move_group))
     nodes.append(Node(
         package="rviz2", executable="rviz2", name="rviz2", output="screen",
         arguments=["-d", rviz_cfg], parameters=moveit_params,

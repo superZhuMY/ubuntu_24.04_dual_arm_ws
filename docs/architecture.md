@@ -1,19 +1,20 @@
 # 系统架构与模块协作
 
-本文说明控制数据流、硬件通信、轨迹执行、采摘状态机，以及固件和视觉的工程边界。接口字段与参数集中在[接口与配置](interfaces_and_config.md)，运行操作见[采摘启动说明](harvest_bringup.md)。
+本文说明任务决策、流程编排、技能执行、硬件通信，以及固件和视觉的工程边界。接口字段、参数和运行命令见[接口与配置](interfaces_and_config.md)及[采摘与打叶启动说明](harvest_bringup.md)。
 
 [项目总览](project_overview.md) · [系统架构](architecture.md) · [接口与配置](interfaces_and_config.md) · [开发与排障](development.md)
 
-资料基线：2026-10-09，ROS 仓库 `9c00aa3`。本次仅核对文档与源码，未重新构建或验证现场硬件。源码路径以工作区根目录为基准；包内简称需结合所属包定位。
+源码路径以工作区根目录为基准，包内简称需结合所属包定位。
 
 ## 1. 数据流
 
 ```text
-人工 YAML 点位（未来：ROS2 视觉目标桥）
-  → 人工 YAML / future perception → TaskTarget
-  → /execute_task : ExecuteTask(task_type, targets, arm roles)
-  → TaskExecutor
-      ├─ TomatoPickTask / LeafRemoveTask（共享流程策略）
+人工 YAML 点位 → 决策输入（任务类型、TCP 目标、执行臂与角色）
+  → /execute_task 与兼容入口 /execute_dual_harvest
+  → TaskExecutor（C++ 任务会话与资源门控）
+      ├─ 流程后端
+      │   ├─ legacy（默认，C++ 参考序列）
+      │   └─ python ↔ GetWorkflowStep ↔ 采摘或打叶的 Python 流程
       ├─ MotionSkill：MoveIt IK / 规划 → 轨迹阶段分发
       │   → TrajectoryDispatcher + StageBarrier：共享开始时间与双臂屏障
       │   → 左右 FollowJointTrajectory Action
@@ -21,8 +22,6 @@
       │   → 左右 ForwardCommandController 的六轴位置目标
       │   → ros2_control 硬件插件 → STM32 → 电机
       └─ GripperSkill → /dual_gripper/command → Modbus RTU 双夹爪
-
-旧 `/execute_dual_harvest` 在过渡期保留，通过兼容转换接入同一个 `TaskExecutor`。
 
 电机位置 → STM32 → 硬件插件 → joint_state_broadcaster
   → /joint_states → 执行器到位确认 / MoveIt 当前状态 / TF
@@ -62,7 +61,11 @@ STM32 帧结构为 `AA 55 | VERSION | CMD | SEQ | LEN | PAYLOAD | CRC16`；ROS �
 
 执行器默认 `allow_simultaneous_arms=false`；两个 harvest launch 显式改为 `true`。同一臂 busy 时仍拒绝新目标。异常或取消会尝试保持最新反馈位置；这一软件行为不能替代硬件急停。
 
-## 2. 采摘状态机
+## 2. 采摘与打叶的流程和技能
+
+任务提交方选择任务、目标和执行臂，可显式提交符合当前作业规则的角色。省略角色时按兼容规则补齐。
+Python 流程负责作业内动作编排。C++ 逐步查询，每条技能确认成功后才查询下一条，直至流程返回 `DONE`。
+旧流程保留为 C++ 对照后端。两种后端复用下述技能和会话管理逻辑。
 
 ```text
 VALIDATE → PREPARE_GRIPPER（开爪）
@@ -74,7 +77,7 @@ VALIDATE → PREPARE_GRIPPER（开爪）
 
 左右启用臂的阶段轨迹共用计划开始时间，阶段屏障等待全部成功才进入下一阶段；失败 / 取消处理见 `failure_policy.cpp`、`stage_barrier.cpp`、`trajectory_dispatcher.cpp`。整个采摘任务有 busy 门控和目标 ID 预留检查。当前目标 ID 在任务结束时释放，属于活动任务的预留机制，不是持久的“已采摘目标历史”；成功后重复提交同一对 ID 可以再次执行。视觉层如需避免反复采摘同一目标，应另做时间和空间去重。
 
-任务类型通过 `/execute_task` Action Goal 的 `task_type` 在运行时选择。`tomato_pick` 保持同步阶段；`leaf_remove` 仅在双臂 RETREAT 时右臂先缩 J3、左臂延迟 3 秒。左臂独立、右臂独立与双臂请求共用同一任务接口。统一环境入口为 `double_arm_bringup robot.launch.py mode:=fake|readonly|real`。
+任务类型通过 `/execute_task` 的 `task_type` 逐 Goal 选择。采摘的双臂动作使用同步起步。打叶在左臂 `hold`、右臂 `operate` 时为双臂 RETREAT 应用配置的起步延迟。左臂单独执行、右臂单独执行与双臂协同共用任务接口。
 
 ## 3. 异常处理与结果边界
 
@@ -83,6 +86,7 @@ VALIDATE → PREPARE_GRIPPER（开爪）
 | 有任务运行、无启用臂、启用臂 ID 空 / 重复、动作门控关闭、MoveGroup 未就绪 | 拒绝 goal | `TaskExecutor::accept_request()` |
 | 启用臂位姿非法、置信度不足、反馈缺失 / 过期 | 已接受的任务在 VALIDATE 或后续阶段进入 PAUSED | `failure_policy.cpp`、当前状态检查 |
 | 规划失败或 J3 伸缩时其他关节偏离超限 | 保持任务 PAUSED，不进入下一阶段 | `MotionSkill` |
+| Python 流程查询超时、报错或工作节点实例变化 | 任务在 WORKFLOW 阶段进入 PAUSED。工作节点若在技能执行期间退出，C++ 仍按现有超时和取消规则收尾 | `task_workflow.cpp` |
 | 某臂轨迹失败、接受超时或阶段超时 | 处理对端取消并进入 PAUSED；迟到接受的 goal 也会被取消 | `trajectory_dispatcher.cpp`、阶段等待逻辑 |
 | streaming 状态过期、无进展或单段超时 | 中止轨迹 Action，尝试保持最新反馈位置 | `StreamingTrajectoryExecutor::_execute()` |
 | 客户端取消 | 取消当前阶段，尝试结束为 CANCELED；状态转换竞态有 abort 回退 | 采摘取消回调及 `finish_canceled` |

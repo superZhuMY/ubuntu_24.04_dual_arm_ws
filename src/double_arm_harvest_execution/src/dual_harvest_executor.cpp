@@ -6,7 +6,6 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
-#include <future>
 #include <thread>
 #include <utility>
 
@@ -21,41 +20,12 @@ namespace double_arm_harvest_execution
 namespace
 {
 
-/// One fixed workflow for manually supplied left/right targets.
-constexpr std::array<Stage, 8> kStageOrder = {
-  Stage::VALIDATE, Stage::PREPARE_GRIPPER, Stage::APPROACH, Stage::PICK, Stage::END_EFFECTOR,
-  Stage::RETREAT, Stage::HOME, Stage::RELEASE_GRIPPER,
-};
-
-constexpr std::size_t kMotionStageCount = 4;  // APPROACH, PICK, RETREAT, HOME
-
 /// Existing FollowJointTrajectory servers of the sparse/streaming execution
 /// chain (plan doc section 2). Do not change without the hardware layer.
 constexpr const char * kLeftFjtAction = "/double_arm_robot/l_arm/follow_joint_trajectory";
 constexpr const char * kRightFjtAction = "/double_arm_robot/r_arm/follow_joint_trajectory";
 
 }  // namespace
-
-std::string stage_name(Stage stage)
-{
-  switch (stage) {
-    case Stage::VALIDATE: return "VALIDATE";
-    case Stage::PREPARE_GRIPPER: return "PREPARE_GRIPPER";
-    case Stage::APPROACH: return "APPROACH";
-    case Stage::PICK: return "PICK";
-    case Stage::END_EFFECTOR: return "END_EFFECTOR";
-    case Stage::RETREAT: return "RETREAT";
-    case Stage::HOME: return "HOME";
-    case Stage::RELEASE_GRIPPER: return "RELEASE_GRIPPER";
-  }
-  return "UNKNOWN";
-}
-
-bool is_motion_stage(Stage stage)
-{
-  return stage == Stage::APPROACH || stage == Stage::PICK ||
-         stage == Stage::RETREAT || stage == Stage::HOME;
-}
 
 template<typename T>
 T TaskExecutor::get_or_declare(const std::string & name, const T & default_value)
@@ -100,6 +70,16 @@ TaskExecutor::TaskExecutor(
   stage_timeout_sec_ = get_or_declare<double>("stage_timeout_sec", 30.0);
   cancel_timeout_sec_ = get_or_declare<double>("cancel_timeout_sec", 3.0);
   allow_task_motion_ = get_or_declare<bool>("allow_task_motion", false);
+  const auto workflow_backend = get_or_declare<std::string>("workflow_backend", "legacy");
+  if (workflow_backend != "legacy" && workflow_backend != "python") {
+    throw std::runtime_error("workflow_backend must be 'legacy' or 'python'");
+  }
+  use_python_workflow_ = workflow_backend == "python";
+  workflow_step_timeout_sec_ = get_or_declare<double>("workflow_step_timeout_sec", 2.0);
+  if (!std::isfinite(workflow_step_timeout_sec_) || workflow_step_timeout_sec_ <= 0.0) {
+    throw std::runtime_error("workflow_step_timeout_sec must be finite and positive");
+  }
+
 
   gripper_action_name_ = get_or_declare<std::string>(
     "gripper_action_name", "/dual_gripper/command");
@@ -124,8 +104,10 @@ TaskExecutor::TaskExecutor(
             "legacy_task_type must be 'tomato_pick', 'leaf', or 'leaf_remove'");
   }
   legacy_task_type_ = *parsed_legacy_type;
-  if (leaf_left_retreat_delay_sec_ < 0.0 || leaf_right_retreat_delay_sec_ < 0.0) {
-    throw std::runtime_error("leaf retreat delays must be non-negative");
+  if (!std::isfinite(leaf_left_retreat_delay_sec_) || leaf_left_retreat_delay_sec_ < 0.0 ||
+    !std::isfinite(leaf_right_retreat_delay_sec_) || leaf_right_retreat_delay_sec_ < 0.0)
+  {
+    throw std::runtime_error("leaf retreat delays must be finite and non-negative");
   }
 
   if (min_confidence_ < 0.0 || min_confidence_ > 1.0) {
@@ -166,6 +148,11 @@ TaskExecutor::TaskExecutor(
   state_cb_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
   fjt_cb_group_ = create_callback_group(rclcpp::CallbackGroupType::Reentrant);
   gripper_cb_group_ = create_callback_group(rclcpp::CallbackGroupType::Reentrant);
+  if (use_python_workflow_) {
+    workflow_client_ = create_client<GetWorkflowStep>(
+      "get_workflow_step", rclcpp::ServicesQoS(), server_cb_group_);
+  }
+
 
   action_server_ = rclcpp_action::create_server<ExecuteDualHarvest>(
     this, "execute_dual_harvest",
@@ -210,9 +197,9 @@ TaskExecutor::TaskExecutor(
   RCLCPP_INFO(
     get_logger(),
     "task executor ready: actions=/execute_task,/execute_dual_harvest "
-    "legacy_type=%s task_motion=%s base=%s left=%s right=%s sync_start=%.2fs min_conf=%.2f "
+    "workflow=%s legacy_type=%s task_motion=%s base=%s left=%s right=%s sync_start=%.2fs min_conf=%.2f "
     "j3_stroke=%.3fm leaf_retreat_L=%.2fs",
-    task_type_name(legacy_task_type_).c_str(),
+    workflow_backend.c_str(), task_type_name(legacy_task_type_).c_str(),
     allow_task_motion_ ? "enabled" : "locked",
     base_frame_.c_str(), left_group_.c_str(), right_group_.c_str(),
     sync_start_delay_sec_, min_confidence_, j3_extend_distance_, leaf_left_retreat_delay_sec_);
@@ -323,7 +310,7 @@ bool TaskExecutor::run_gripper_command(
 // ---------------------------------------------------------------------------
 
 rclcpp_action::GoalResponse TaskExecutor::on_legacy_goal(
-  const rclcpp_action::GoalUUID & /*uuid*/, std::shared_ptr<const HarvestGoal> goal)
+  const rclcpp_action::GoalUUID & uuid, std::shared_ptr<const HarvestGoal> goal)
 {
   TaskRequest request;
   request.task_id = "legacy-pending";
@@ -345,11 +332,11 @@ rclcpp_action::GoalResponse TaskExecutor::on_legacy_goal(
     RCLCPP_WARN(get_logger(), "Rejecting legacy goal: %s", role_error->c_str());
     return rclcpp_action::GoalResponse::REJECT;
   }
-  return accept_request(request);
+  return accept_request(request, uuid);
 }
 
 rclcpp_action::GoalResponse TaskExecutor::on_task_goal(
-  const rclcpp_action::GoalUUID & /*uuid*/, std::shared_ptr<const TaskGoal> goal)
+  const rclcpp_action::GoalUUID & uuid, std::shared_ptr<const TaskGoal> goal)
 {
   const auto type = parse_task_type(goal->task_type);
   if (!type) {
@@ -371,10 +358,11 @@ rclcpp_action::GoalResponse TaskExecutor::on_task_goal(
     RCLCPP_WARN(get_logger(), "Rejecting task goal: %s", role_error->c_str());
     return rclcpp_action::GoalResponse::REJECT;
   }
-  return accept_request(request);
+  return accept_request(request, uuid);
 }
 
-rclcpp_action::GoalResponse TaskExecutor::accept_request(const TaskRequest & request)
+rclcpp_action::GoalResponse TaskExecutor::accept_request(
+  const TaskRequest & request, const rclcpp_action::GoalUUID & uuid)
 {
   std::lock_guard<std::mutex> lock(goal_gate_mutex_);
   if (busy_) {
@@ -429,6 +417,7 @@ rclcpp_action::GoalResponse TaskExecutor::accept_request(const TaskRequest & req
   }
 
   busy_ = true;
+  active_goal_id_ = uuid;
   {
     std::lock_guard<std::mutex> stage_lock(stage_mutex_);
     active_dispatch_id_ = 0;
@@ -438,26 +427,29 @@ rclcpp_action::GoalResponse TaskExecutor::accept_request(const TaskRequest & req
 }
 
 rclcpp_action::CancelResponse TaskExecutor::on_legacy_cancel(
-  const std::shared_ptr<GoalHandleHarvest> /*goal_handle*/)
+  const std::shared_ptr<GoalHandleHarvest> goal_handle)
 {
-  request_cancel();
-  return rclcpp_action::CancelResponse::ACCEPT;
+  return request_cancel(goal_handle->get_goal_id());
 }
 
 rclcpp_action::CancelResponse TaskExecutor::on_task_cancel(
-  const std::shared_ptr<GoalHandleTask> /*goal_handle*/)
+  const std::shared_ptr<GoalHandleTask> goal_handle)
 {
-  request_cancel();
-  return rclcpp_action::CancelResponse::ACCEPT;
+  return request_cancel(goal_handle->get_goal_id());
 }
 
-void TaskExecutor::request_cancel()
+rclcpp_action::CancelResponse TaskExecutor::request_cancel(const rclcpp_action::GoalUUID & uuid)
 {
+  std::lock_guard<std::mutex> gate_lock(goal_gate_mutex_);
+  if (!busy_ || active_goal_id_ != uuid) {
+    return rclcpp_action::CancelResponse::REJECT;
+  }
   RCLCPP_WARN(get_logger(), "Cancel requested for the active task");
   std::lock_guard<std::mutex> lock(stage_mutex_);
   cancel_requested_.store(true);
   barrier_.request_cancel();
   stage_cv_.notify_all();
+  return rclcpp_action::CancelResponse::ACCEPT;
 }
 
 TaskRequest TaskExecutor::convert_legacy_goal(const HarvestGoal & goal)
@@ -934,10 +926,6 @@ void TaskExecutor::execute_request(const TaskRequest & request, const GoalCallba
       active_feedback_publisher_ = {};
     },
     [this] {cancel_outstanding_arms();}, recovery_required_);
-  const RetreatDelays retreat_delays = request.task_type == TaskType::TOMATO_PICK ?
-    TomatoPickTask().retreat_delays(left_enabled, right_enabled, request.roles) :
-    LeafRemoveTask(leaf_left_retreat_delay_sec_, leaf_right_retreat_delay_sec_)
-    .retreat_delays(left_enabled, right_enabled, request.roles);
   {
     std::lock_guard<std::mutex> lock(feedback_state_mutex_);
     active_feedback_publisher_ = callbacks.publish_feedback;
@@ -965,16 +953,15 @@ void TaskExecutor::execute_request(const TaskRequest & request, const GoalCallba
       }
       RCLCPP_WARN(get_logger(), "[task=%s][%s] CANCELED", task_id.c_str(), stage.c_str());
     };
-  const float disabled_progress = 0.0f;
-  float left_progress = 0.0f;
-  float right_progress = 0.0f;
+  float progress = 0.0F;
 
   auto fail = [&](const std::string & stage, const std::string & message) {
       RCLCPP_WARN(get_logger(), "[task=%s][%s] PAUSED: %s; cancel before resubmitting",
         task_id.c_str(), stage.c_str(), message.c_str());
       publish_stage_feedback(
         callbacks, task_id, left_enabled ? "PAUSED" : "", right_enabled ? "PAUSED" : "",
-        left_progress, right_progress, "paused at " + stage + ": " + message, "PAUSED", stage);
+        left_enabled ? progress : 0.0F, right_enabled ? progress : 0.0F,
+        "paused at " + stage + ": " + message, "PAUSED", stage);
       std::unique_lock<std::mutex> lock(stage_mutex_);
       while (rclcpp::ok() && callbacks.is_active() && !cancel_requested_.load()) {
         stage_cv_.wait_for(lock, std::chrono::milliseconds(200));
@@ -1002,16 +989,11 @@ void TaskExecutor::execute_request(const TaskRequest & request, const GoalCallba
       RCLCPP_INFO(get_logger(), "[task=%s] SUCCEEDED: %s", task_id.c_str(), message.c_str());
     };
 
-
   guard.run([&] {
-    // -----------------------------------------------------------------------
-    // VALIDATE
-    // -----------------------------------------------------------------------
-    const std::string validate_stage = stage_name(Stage::VALIDATE);
+    const std::string validate_stage = "VALIDATE";
     publish_stage_feedback(
-      callbacks,
-      task_id, left_enabled ? validate_stage : "", right_enabled ? validate_stage : "",
-      disabled_progress, disabled_progress, "validating targets");
+      callbacks, task_id, left_enabled ? validate_stage : "", right_enabled ? validate_stage : "",
+      0.0F, 0.0F, "validating targets");
 
     if (left_enabled) {
       if (const auto error = validate_target(request.left_target, "left")) {
@@ -1046,190 +1028,117 @@ void TaskExecutor::execute_request(const TaskRequest & request, const GoalCallba
       left_enabled ? "enabled" : "disabled", request.right_target.target_id.c_str(),
       right_enabled ? "enabled" : "disabled");
 
-    // -----------------------------------------------------------------------
-    // motion stages
-    // -----------------------------------------------------------------------
-    std::size_t completed_motion = 0;
-    for (const Stage stage : kStageOrder) {
-      if (stage == Stage::VALIDATE) {
-        continue;
-      }
-
+    const auto query = use_python_workflow_ ? make_workflow_query(request) : nullptr;
+    std::string worker_id;
+    std::string current_stage = validate_stage;
+    uint32_t completed_steps = 0;
+    while (rclcpp::ok() && callbacks.is_active()) {
       if (cancel_requested_.load()) {
-        finish_canceled(stage_name(stage));
-        return;
-      }
-      if (!callbacks.is_active()) {
+        finish_canceled(current_stage);
         return;
       }
 
-      // The fixed workflow always includes the dedicated dual-gripper action.
-      if (stage == Stage::PREPARE_GRIPPER || stage == Stage::END_EFFECTOR ||
-        stage == Stage::RELEASE_GRIPPER)
-      {
-        const std::string stage_str = stage_name(stage);
-        const bool opening = stage != Stage::END_EFFECTOR;
-        publish_stage_feedback(
-          callbacks,
-      task_id, left_enabled ? stage_str : "", right_enabled ? stage_str : "",
-          left_progress, right_progress,
-          stage == Stage::PREPARE_GRIPPER ? "opening enabled grippers" :
-          stage == Stage::RELEASE_GRIPPER ? "releasing enabled grippers after HOME" :
-          "closing enabled grippers");
-        std::string gripper_error;
-        const double position = opening ? gripper_open_position_ : gripper_close_position_;
-        if (!run_gripper_command(left_enabled, right_enabled, position, gripper_error)) {
-          if (cancel_requested_.load()) {
-            finish_canceled(stage_str);
-          } else {
-            fail(stage_str, gripper_error);
-          }
+      WorkflowStep step;
+      if (query) {
+        query->completed_steps = completed_steps;
+        std::string error;
+        WorkflowStep::SharedPtr response;
+        try {
+          response = query_workflow_step(query, worker_id, progress, error);
+        } catch (const std::exception & ex) {
+          error = ex.what();
+        }
+        if (cancel_requested_.load()) {
+          finish_canceled("WORKFLOW");
           return;
         }
-        RCLCPP_INFO(
-          get_logger(), "[task=%s][%s] both enabled grippers acknowledged",
-          task_id.c_str(), stage_str.c_str());
-        continue;
+        if (!response) {
+          fail("WORKFLOW", error.empty() ? "workflow query interrupted" : error);
+          return;
+        }
+        step = *response;
+      } else {
+        step = legacy_step(request, completed_steps);
+      }
+      if (step.skill == WorkflowStep::DONE) {
+        break;
       }
 
-      const std::string stage_str = stage_name(stage);
-      const auto stage_start = std::chrono::steady_clock::now();
+      current_stage = step.stage;
+      const bool gripper = step.skill == WorkflowStep::OPEN_GRIPPER ||
+        step.skill == WorkflowStep::CLOSE_GRIPPER;
+      const bool opening = step.skill == WorkflowStep::OPEN_GRIPPER;
       publish_stage_feedback(
-        callbacks,
-      task_id, left_enabled ? stage_str : "", right_enabled ? stage_str : "",
-        left_progress, right_progress, "planning " + stage_str);
+        callbacks, task_id, step.execute_left ? current_stage : "",
+        step.execute_right ? current_stage : "",
+        step.execute_left ? progress : 0.0F, step.execute_right ? progress : 0.0F,
+        gripper ? (opening ? "opening enabled grippers" : "closing enabled grippers") :
+        "planning " + current_stage);
 
-      // Plan the next stage only from fresh feedback (plan doc 13.1).
-      std::string fresh_error;
-      if (!joint_states_ready(required_joints, &fresh_error)) {
-        fail(stage_str, fresh_error);
-        return;
-      }
-
-      // Fixed manual workflow: one seeded IK to APPROACH, direct J3 extension,
-      // direct J3 retraction, then the named HOME joint target.
-      auto plan_stage_for = [&](
-        Stage st, moveit::planning_interface::MoveGroupInterface & arm,
-        const double_arm_harvest_interfaces::msg::TaskTarget & target,
-        const std::array<double, 3> & j3_axis,
-        const double j3_extend_sign,
-        const std::string & home_name) -> ArmStagePlan {
-        if (st == Stage::HOME) {
-          return motion_skill_->plan_named(arm, home_name);
-        }
-        if (st == Stage::PICK) {
-          return motion_skill_->plan_j3_delta(arm, j3_extend_sign * j3_extend_distance_);
-        }
-        if (st == Stage::RETREAT) {
-          return motion_skill_->plan_j3_delta(arm, -j3_extend_sign * j3_extend_distance_);
-        }
-        const std::array<double, 3> back = {
-          -j3_extend_distance_ * j3_axis[0],
-          -j3_extend_distance_ * j3_axis[1],
-          -j3_extend_distance_ * j3_axis[2]};
-        return motion_skill_->plan_pose(arm, motion_skill_->stage_target_pose_base(target, back));
-      };
-
-      ArmStagePlan left_plan;
-      ArmStagePlan right_plan;
-      if (left_enabled) {
-        left_plan = plan_stage_for(
-          stage, *left_arm_, request.left_target, left_j3_extend_axis_,
-          1.0,
-          left_home_name_);
-        if (!left_plan.success) {
-          RCLCPP_ERROR(
-            get_logger(), "[task=%s][%s] left plan failed: %s", task_id.c_str(),
-            stage_str.c_str(), left_plan.error.c_str());
-        }
-      }
-      if (right_enabled) {
-        right_plan = plan_stage_for(
-          stage, *right_arm_, request.right_target, right_j3_extend_axis_,
-          -1.0,
-          right_home_name_);
-        if (!right_plan.success) {
-          RCLCPP_ERROR(
-            get_logger(), "[task=%s][%s] right plan failed: %s", task_id.c_str(),
-            stage_str.c_str(), right_plan.error.c_str());
-        }
-      }
-
+      std::string error;
+      const bool success = gripper ?
+        run_gripper_command(
+        step.execute_left, step.execute_right,
+        opening ? gripper_open_position_ : gripper_close_position_, error) :
+        run_motion_skill(request, step, required_joints, error);
       if (cancel_requested_.load()) {
-        finish_canceled(stage_str);
+        finish_canceled(current_stage);
+        return;
+      }
+      if (!success) {
+        fail(current_stage, error);
         return;
       }
 
-      // Gate: any planning failure means nothing is dispatched at all.
-      if ((left_enabled && !left_plan.success) || (right_enabled && !right_plan.success)) {
-        std::string message = "not dispatched because ";
-        if (left_enabled && !left_plan.success) {
-          message += "left planning failed: " + left_plan.error;
-        }
-        if (right_enabled && !right_plan.success) {
-          if (left_enabled && !left_plan.success) {
-            message += "; ";
-          }
-          message += "right planning failed: " + right_plan.error;
-        }
-        fail(stage_str, message);
-        return;
+      ++completed_steps;
+      progress = step.progress;
+      if (!gripper) {
+        publish_stage_feedback(
+          callbacks, task_id, step.execute_left ? current_stage : "",
+          step.execute_right ? current_stage : "",
+          step.execute_left ? progress : 0.0F, step.execute_right ? progress : 0.0F,
+          current_stage + " completed");
       }
-
       RCLCPP_INFO(
-        get_logger(), "[task=%s][%s] plans ready: left_points=%zu right_points=%zu",
-        task_id.c_str(), stage_str.c_str(), left_plan.trajectory.points.size(),
-        right_plan.trajectory.points.size());
-
-      double left_stagger = 0.0;
-      double right_stagger = 0.0;
-      if (stage == Stage::RETREAT) {
-        left_stagger = retreat_delays.left;
-        right_stagger = retreat_delays.right;
-      }
-      if (left_stagger > 0.0 || right_stagger > 0.0) {
-        RCLCPP_INFO(
-          get_logger(), "[task=%s][%s] leaf mode: stagger L=%.2fs R=%.2fs",
-          task_id.c_str(), stage_str.c_str(), left_stagger, right_stagger);
-      }
-
-      std::string dispatch_error;
-      if (!run_stage_dispatch(
-          task_id, stage_str, left_enabled, right_enabled, left_plan, right_plan,
-          dispatch_error, left_stagger, right_stagger))
-      {
-        // Nothing advances after a failure or cancel; hold position and stop.
-        if (cancel_requested_.load()) {
-          finish_canceled(stage_str);
-        } else {
-          fail(stage_str, dispatch_error);
-        }
-        return;
-      }
-
-      completed_motion += 1;
-      left_progress =
-        left_enabled ? static_cast<float>(completed_motion) / kMotionStageCount : 0.0f;
-      right_progress =
-        right_enabled ? static_cast<float>(completed_motion) / kMotionStageCount : 0.0f;
-      publish_stage_feedback(
-        callbacks,
-      task_id, left_enabled ? stage_str : "", right_enabled ? stage_str : "",
-        left_progress, right_progress, stage_str + " completed");
-      const double stage_seconds =
-        std::chrono::duration<double>(std::chrono::steady_clock::now() - stage_start).count();
-      RCLCPP_INFO(
-        get_logger(), "[task=%s][%s] completed: left=%s right=%s duration=%.2fs",
-        task_id.c_str(), stage_str.c_str(),
-        left_enabled ? "SUCCESS" : "skipped", right_enabled ? "SUCCESS" : "skipped",
-        stage_seconds);
+        get_logger(), "[task=%s][%s] completed: left=%s right=%s",
+        task_id.c_str(), current_stage.c_str(),
+        step.execute_left ? "SUCCESS" : "skipped", step.execute_right ? "SUCCESS" : "skipped");
     }
 
-    publish_stage_feedback(
-      callbacks,
-      task_id, left_enabled ? "DONE" : "", right_enabled ? "DONE" : "",
-      left_enabled ? 1.0f : 0.0f, right_enabled ? 1.0f : 0.0f, "all stages completed");
-    succeed(task_type_name(request.task_type) + " stages completed");
+    if (!callbacks.is_active()) {
+      return;
+    }
+    if (!rclcpp::ok()) {
+      ExecuteTask::Result result;
+      result.task_id = task_id;
+      result.failed_stage = current_stage;
+      result.error_code = "SHUTDOWN";
+      result.message = "node shut down during task";
+      callbacks.finish(result, GoalTermination::ABORTED);
+      return;
+    }
+    // Serialize the decision to complete with the cancel callback.
+    std::optional<rclcpp_action::GoalUUID> completed_goal;
+    {
+      std::lock_guard<std::mutex> lock(goal_gate_mutex_);
+      if (!cancel_requested_.load()) {
+        completed_goal = std::exchange(active_goal_id_, std::nullopt);
+      }
+    }
+    if (!completed_goal) {
+      finish_canceled(current_stage);
+      return;
+    }
+    try {
+      publish_stage_feedback(
+        callbacks, task_id, left_enabled ? "DONE" : "", right_enabled ? "DONE" : "",
+        left_enabled ? 1.0F : 0.0F, right_enabled ? 1.0F : 0.0F, "all stages completed");
+      succeed(task_type_name(request.task_type) + " stages completed");
+    } catch (...) {
+      std::lock_guard<std::mutex> lock(goal_gate_mutex_);
+      active_goal_id_ = completed_goal;
+      throw;
+    }
   }, [&](const std::string & error) {
       if (cancel_requested_.load()) {
         finish_canceled("INTERNAL");

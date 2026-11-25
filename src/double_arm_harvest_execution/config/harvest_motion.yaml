@@ -29,6 +29,8 @@ dual_arm_harvest_executor:
     # Compatibility-only mapping for /execute_dual_harvest. /execute_task
     # always selects its type from the Action goal.
     legacy_task_type: tomato_pick
+    # Combined discovery and response deadline for each Python workflow query.
+    workflow_step_timeout_sec: 2.0
     leaf_left_retreat_delay_sec: 3.0
     leaf_right_retreat_delay_sec: 0.0
     # Time budget for both FollowJointTrajectory goals being accepted.

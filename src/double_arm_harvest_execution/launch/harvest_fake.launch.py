@@ -12,8 +12,8 @@ The streaming executor runs with allow_simultaneous_arms=true, so the same
 goal gating, shared start stamp and stage barrier are exercised here as on
 the STM32 hardware.
 
-The only mode option is RViz visibility. The mock gripper and the complete
-manual-target workflow are always enabled. Send a target after the
+The mock gripper is always enabled. Select the staged Python workflow with
+workflow_backend:=python, or use the default C++ workflow. Send a target after the
 "move groups ready" log with send_manual_harvest_goal.py.
 """
 
@@ -48,6 +48,7 @@ def _node_override(**params):
 
 def generate_launch_description():
     args = {
+        "workflow_backend": ("legacy", ["legacy", "python"]),
         "start_rviz": ("false", ["true", "false"]),
     }
     decls = []
@@ -102,14 +103,23 @@ def generate_launch_description():
     ]
 
     def _harvest_node(context):
-        override = _node_override(allow_task_motion=True)
-        return [Node(
+        backend = lcs["workflow_backend"].perform(context)
+        override = _node_override(
+            allow_task_motion=True, workflow_backend=backend)
+        actions = [Node(
             package="double_arm_harvest_execution",
             executable="dual_arm_harvest_executor",
             name=NODE_NAME,
             output="screen",
             parameters=harvest_params + [override],
         )]
+        if backend == "python":
+            actions.append(Node(
+                package="double_arm_harvest_execution",
+                executable="harvest_workflow_worker.py",
+                output="screen",
+            ))
+        return actions
 
     return LaunchDescription(decls + [
         IncludeLaunchDescription(

@@ -34,7 +34,8 @@ def resolve(mode, **overrides):
         elif isinstance(action, Node):
             executable = action._Node__node_executable
             if executable in ('dual_gripper_controller', 'dual_arm_harvest_executor',
-                              'ros2_control_node', 'robot_state_publisher'):
+                              'ros2_control_node', 'robot_state_publisher',
+                              'harvest_workflow_worker.py'):
                 nodes[executable] = evaluate_parameters(context, action._Node__parameters)
         elif isinstance(action, (DeclareLaunchArgument, SetLaunchConfiguration,
                                  IncludeLaunchDescription, OpaqueFunction)):
@@ -96,6 +97,8 @@ def test_effective_real_hardware_manifest_and_explicit_devices(override):
         assert hardware['stm32_joint_directions'] == '1,1,1,1,-1,1,1,1,1,1,-1,1'
         assert hardware['allow_motor_enable'] == 'false'
     assert task['allow_task_motion'] is False
+    assert task['workflow_backend'] == 'legacy'
+    assert 'harvest_workflow_worker.py' not in nodes
 
 
 def test_readonly_does_not_provide_command_nodes_with_enables_requested():
@@ -112,8 +115,11 @@ def test_readonly_does_not_provide_command_nodes_with_enables_requested():
 
 @pytest.mark.parametrize('motor,gripper', [('true', 'false'), ('false', 'true'), ('true', 'true')])
 def test_real_task_gate_requires_both_explicit_enables(motor, gripper):
-    nodes = resolve('real', allow_motor_enable=motor, gripper_allow_motion=gripper)
+    nodes = resolve('real', workflow_backend='python',
+                    allow_motor_enable=motor, gripper_allow_motion=gripper)
     task = effective('dual_arm_harvest_executor', nodes['dual_arm_harvest_executor'])
     controller = effective('dual_gripper_controller', nodes['dual_gripper_controller'])
+    assert 'harvest_workflow_worker.py' in nodes
+    assert task['workflow_backend'] == 'python'
     assert task['allow_task_motion'] is (motor == 'true' and gripper == 'true')
     assert controller['allow_motion'] is (gripper == 'true')

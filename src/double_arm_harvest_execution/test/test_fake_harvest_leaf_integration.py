@@ -14,6 +14,7 @@ import launch.actions
 import launch.launch_description_sources
 import launch_testing
 import launch_testing.actions
+import launch_testing.asserts
 import pytest
 from action_msgs.msg import GoalStatus
 
@@ -21,6 +22,8 @@ import rclpy
 from double_arm_harvest_interfaces.action import ExecuteTask
 from double_arm_harvest_interfaces.msg import TaskTarget
 from geometry_msgs.msg import Point, Quaternion
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import LaunchConfiguration
 from rclpy.action import ActionClient
 
 REACHABLE_LEFT = (0.2155, 0.4281, 0.0180)
@@ -36,9 +39,11 @@ WORKFLOW_STAGES = (
 def generate_test_description():
     robot_launch = Path(__file__).parents[2] / "double_arm_bringup" / "launch" / "robot.launch.py"
     return launch.LaunchDescription([
+        DeclareLaunchArgument('workflow_backend', default_value='legacy'),
         launch.actions.IncludeLaunchDescription(
             launch.launch_description_sources.PythonLaunchDescriptionSource(robot_launch),
-            launch_arguments={"mode": "fake", "start_rviz": "false"}.items(),
+            launch_arguments={"mode": "fake", "start_rviz": "false",
+                              "workflow_backend": LaunchConfiguration('workflow_backend')}.items(),
         ),
         launch_testing.actions.ReadyToTest(),
     ])
@@ -93,7 +98,8 @@ class FakeTaskIntegration(unittest.TestCase):
 
         def feedback_callback(msg):
             stage = msg.feedback.current_stage
-            if stage in WORKFLOW_STAGES and (not stages or stages[-1] != stage):
+            # Periodic feedback may replay a stage after its transition.
+            if stage in WORKFLOW_STAGES and stage not in stages:
                 stages.append(stage)
             trigger = (cancel_on_gripper and msg.feedback.message == "opening enabled grippers") or (
                 cancel_on_pause and msg.feedback.state == "PAUSED")
@@ -174,3 +180,12 @@ class FakeTaskIntegration(unittest.TestCase):
         recovered_result = self._wait_result(recovered)
         self.assertEqual(recovered_result.status, GoalStatus.STATUS_SUCCEEDED)
         self.assertTrue(recovered_result.result.success)
+
+
+@launch_testing.post_shutdown_test()
+class ProcessExitChecks(unittest.TestCase):
+    def test_move_group_exits_normally(self, proc_info):
+        launch_testing.asserts.assertExitCodes(proc_info, process='move_group')
+
+    def test_task_executor_exits_normally(self, proc_info):
+        launch_testing.asserts.assertExitCodes(proc_info, process='dual_arm_harvest_executor')

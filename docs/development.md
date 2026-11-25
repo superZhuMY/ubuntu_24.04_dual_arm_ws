@@ -132,15 +132,43 @@ ros2 run double_arm_harvest_execution send_manual_harvest_goal.py --timeout 240
 
 新增验证结论时记录日期、执行模式、硬件 / 固件版本、实际命令与结果，区分离线单元测试、fake 集成和真机实测。
 
-### 已知问题：fake 启动退出时 MoveIt 崩溃
+### Jazzy MoveIt 退出崩溃与 fake 隔离
 
-2026-11-13 在 ROS 2 Jazzy 的 `moveit_ros_move_group` 2.12.4 环境中，
-fake 启动退出时观察到 `move_group` 以 `-11` 退出；单独启动
-`stm32_moveit.launch.py hardware_mode:=fake start_rviz:=false`，不启动任务执行器时也能复现。
-原始栈位于 `rclcpp::Executor` 析构阶段，原因尚未确认；任务完成并不代表整个系统正常退出。
-一次动态加载跟踪显示崩溃地址位于已卸载的 Pilz `libsequence_capability.so` 地址范围内，
-提示插件与回调对象生命周期可能有关。一次仅在临时环境中保留该库的实验里
-`move_group` 正常退出，但这不足以证明其他环境可靠，也没有作为工程修复采用。
-`test_task_partial_send_integration.py` 现在检查任务执行器和 `move_group` 的退出码，
-因此当前环境的全量测试会报告该失败。不要将其作为通过或跳过处理。
-未连接真实硬件，上述观察不构成真机验证。
+在 ROS 2 Jazzy 的 `moveit_ros_move_group` 2.12.4 上，以下命令可在没有任务执行器、夹爪和
+RViz 的情况下复现。等待 `You can start planning now!` 后按 Ctrl+C，检查 `move_group` 子进程的
+退出记录。复核时子进程收到 SIGINT 后以 `-11`（SIGSEGV）退出。
+
+```bash
+ros2 launch double_arm_robot_moveit_config stm32_moveit.launch.py \
+  hardware_mode:=fake start_rviz:=false fake_keep_moveit_plugins:=false
+```
+
+独立运行 `move_group` 时，三次正常启动后的 SIGINT 都在 `rclcpp::Executor` 析构期间触发崩溃，
+故障地址属于此前映射的 Pilz `libsequence_capability.so`。仅禁用 Pilz 序列能力后，两次正常启动
+后的退出仍以 `-11` 失败，故障地址落在 `libmoveit_simple_controller_manager.so`，栈经过
+`TrajectoryExecutionManager` 和 `CallbackGroup` 析构。结果支持插件卸载早于其 ROS 回调对象销毁
+的判断，与上游同版本报告一致。[MoveIt 上游报告](https://github.com/moveit/moveit2/issues/3680)
+
+该启动文件的 fake 模式默认仅为 `move_group` 设置进程级 `LD_PRELOAD`，保留这两个插件库至进程退出。
+Jazzy 的 `class_loader` 在检测到预加载注册后也会保留该进程的其他插件库。隔离保留 Pilz 规划及
+序列接口和控制器 Action。streaming、sparse 和 continuous 三种 fake 模式均观测到
+`move_group` 正常退出，部分下发故障的 launch test 仍严格断言任务执行器和 `move_group` 的退出码。
+真实硬件启动沿用默认加载行为。本次验证限于 fake 环境。更换 MoveIt 版本后，可用上述命令和退出
+断言复核上游修复，确认后移除隔离。
+
+### 2026-11-25 Python 流程迁移验证
+
+基线为 `codex/task-workflow-runtime` 的 `8cadab7`。ROS 2 Jazzy 下在独立构建目录用
+`colcon build --symlink-install --cmake-args -DPython3_EXECUTABLE=/usr/bin/python3` 构建 9 个包。
+随后依次测试 hardware、sparse execution、end effector、harvest execution 和 bringup 五个包。
+执行包 CTest 21/21 通过。包含 CTest 套件与各测试框架明细的 `colcon test-result` 汇总为
+482 条记录，0 错误、0 失败、0 跳过。
+
+- C++ 和 Python 后端均通过同一会话内的采摘 → 打叶 → 采摘、左右单臂、阶段顺序及双臂时间戳检查。
+  轨迹和夹爪请求的故障矩阵覆盖取消、超时、部分下发、对端失败与迟到终态。
+- 单独终止 Python 工作节点时，C++ 继续管理已下发的技能，后续查询在 WORKFLOW 阶段暂停。
+  测试覆盖取消后的恢复、迟到响应隔离和执行器及 `move_group` 的实际退出码。
+- 原始基线在并行试验期间有一次轨迹分发单测超时，隔离环境下复跑 30 轮通过，本轮完整测试也通过。
+  该次超时的原因尚待确认。
+
+本次覆盖 mock 硬件与离线测试。STM32、实体双臂和真实夹爪验收仍待完成。

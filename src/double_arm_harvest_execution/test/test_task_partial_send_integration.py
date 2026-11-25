@@ -27,6 +27,7 @@ def generate_test_description():
 
 class PartialSubmissionIntegration(recovery.TaskRecoveryIntegration):
     test_fault_matrix = None
+    test_task_order_and_scheduled_arm_starts = None
 
     def test_partial_submission_waits_for_both_terminal_results(self):
         with self.case_cleanup():

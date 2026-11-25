@@ -19,6 +19,7 @@ def _mode_condition(mode, value):
 def generate_launch_description():
     mode = LaunchConfiguration("mode")
     start_rviz = LaunchConfiguration("start_rviz")
+    workflow_backend = LaunchConfiguration("workflow_backend")
     stm32_device = LaunchConfiguration("stm32_device")
     gripper_device = LaunchConfiguration("gripper_device")
     allow_motor_enable = LaunchConfiguration("allow_motor_enable")
@@ -36,6 +37,9 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "mode", default_value="fake", choices=["fake", "readonly", "real"],
             description="Hardware topology: fake, readonly, or real"),
+        DeclareLaunchArgument(
+            "workflow_backend", default_value="legacy", choices=["legacy", "python"],
+            description="Task workflow implementation for fake and real"),
         DeclareLaunchArgument("start_rviz", default_value="false", choices=["true", "false"]),
         DeclareLaunchArgument("stm32_device", default_value="/dev/serial/by-path/pci-0000:06:00.3-usb-0:2.2.2:1.0-port0"),
         DeclareLaunchArgument("gripper_device", default_value="/dev/serial/by-path/pci-0000:06:00.3-usb-0:2.2.3:1.0-port0"),
@@ -47,7 +51,10 @@ def generate_launch_description():
             description="Explicit real-hardware gripper motion gate"),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(fake_launch),
-            launch_arguments={"start_rviz": start_rviz}.items(),
+            launch_arguments={
+                "start_rviz": start_rviz,
+                "workflow_backend": workflow_backend,
+            }.items(),
             condition=_mode_condition(mode, "fake")),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(readonly_launch),
@@ -57,6 +64,7 @@ def generate_launch_description():
             PythonLaunchDescriptionSource(real_launch),
             launch_arguments={
                 "start_rviz": start_rviz,
+                "workflow_backend": workflow_backend,
                 "stm32_device": stm32_device,
                 "gripper_device": gripper_device,
                 "allow_motor_enable": allow_motor_enable,
